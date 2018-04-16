@@ -1,3 +1,9 @@
+#if 0
+TODO:
+    -ping pong
+    -alert client websocket thread about closure from background thread
+#endif
+
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,25 +12,136 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
-#include <sys/wait.h>
 #include <signal.h>
 #include <pthread.h>
+#include <fcntl.h>
+#include <semaphore.h>
+
+#define ArrayCount(array) (sizeof(array)/sizeof(array[0]))
+#define KILOBYTES(x) (x*1024)
+#define MEGABYTES(x) (x*1024*1024)
 
 #define WEBSOCKET_KEY_HEADER "Sec-WebSocket-Key: "
 #define WEBSOCKET_KEY_HEADER_LENGTH strlen(WEBSOCKET_KEY_HEADER)
-
-#define ArrayCount(array) (sizeof(array)/sizeof(array[0]))
 
 #define WEBSERVER_PORT "3490"
 #define VIDEO_STREAM_PORT "3491"
 
 #define BACKLOG 10
 
+#define OPCODE_CONNECTION_CLOSE 0x08
+
+// TODO: sync this
+pthread_t thread_pool[20];
+int thread_pool_size;
+
+char semaphore_name[] = "aaaaaaaaaa";
+
+/* wrappers */
+//{
+
+#define MAKE_WRAPPER1(return_value, name, t1, n1) \
+    return_value name##_(t1 n1) \
+    { \
+        int result = name(n1);\
+        if(result == -1) \
+        { \
+            perror(#name "() failed"); \
+        } \
+        return result; \
+    }
+
+#define MAKE_WRAPPER2(return_value, name, t1, n1, t2, n2) \
+    return_value name##_(t1 n1, t2 n2) \
+    { \
+        int result = name(n1, n2);\
+        if(result == -1) \
+        { \
+            perror(#name "() failed"); \
+        } \
+        return result; \
+    }
+
+#define MAKE_WRAPPER3(return_value, name, t1, n1, t2, n2, t3, n3) \
+    return_value name##_(t1 n1, t2 n2, t3 n3) \
+    { \
+        int result = name(n1, n2, n3);\
+        if(result == -1) \
+        { \
+            perror(#name "() failed"); \
+        } \
+        return result; \
+    }
+
+#define MAKE_WRAPPER4(return_value, name, t1, n1, t2, n2, t3, n3, t4, n4) \
+    return_value name##_(t1 n1, t2 n2, t3 n3, t4 n4) \
+    { \
+        int result = name(n1, n2, n3, n4);\
+        if(result == -1) \
+        { \
+            perror(#name "() failed"); \
+        } \
+        return result; \
+    }
+
+#define MAKE_WRAPPER5(return_value, name, t1, n1, t2, n2, t3, n3, t4, n4, t5, n5) \
+    return_value name##_(t1 n1, t2 n2, t3 n3, t4 n4, t5 n5) \
+    { \
+        int result = name(n1, n2, n3, n4, n5);\
+        if(result == -1) \
+        { \
+            perror(#name "() failed"); \
+        } \
+        return result; \
+    }
+
+MAKE_WRAPPER1(int, sem_post, sem_t *, sem);
+MAKE_WRAPPER1(int, sem_wait, sem_t *, sem);
+MAKE_WRAPPER1(int, close, int, fd);
+MAKE_WRAPPER2(int, listen, int, sockfd, int, backlog);
+MAKE_WRAPPER3(int, socket, int, domain, int, type, int, protocol);
+MAKE_WRAPPER3(int, bind, int, sockfd, const struct sockaddr *, addr, socklen_t, addrlen);
+MAKE_WRAPPER3(int, accept, int, sockfd, struct sockaddr *, addr, socklen_t *, addrlen);
+MAKE_WRAPPER4(ssize_t, recv, int, sockfd, void *, buf, size_t, len, int, flags);
+MAKE_WRAPPER4(ssize_t, send, int, sockfd, void *, buf, size_t, len, int, flags);
+MAKE_WRAPPER5(int, setsockopt, int, sockfd, int, level, int, optname, const void *, optval, socklen_t, optlen);
+
+sem_t *create_semaphore()
+{
+    sem_t *sem = sem_open(semaphore_name, O_CREAT, S_IRWXU, 0);
+    if(sem == SEM_FAILED)
+    {
+        perror("sem_open() failed");
+    }
+
+    // increment semaphore name
+    {
+        for(uint32_t i = 0; i < ArrayCount(semaphore_name); i++)
+        {
+            if(semaphore_name[i] < 'z')
+            {
+                semaphore_name[i]++;
+                break;
+            }
+        }
+    }
+
+    return sem;
+}
+
 /* utilities */
 //{
+
+uint32_t min(int x, int y)
+{
+    uint32_t result = (x < y) ? x : y;
+    return result;
+}
 
 uint16_t get16be(uint8_t *src)
 {
@@ -69,7 +186,7 @@ int load_file(const char *filename, char **buffer_out, int *filesize_out)
     FILE *file_fp = fopen(filename, "rb");
     if(file_fp == NULL)
     {
-        printf("failed to open webpage\n");
+        perror("fopen() failed");
         return false;
     }
 
@@ -83,7 +200,7 @@ int load_file(const char *filename, char **buffer_out, int *filesize_out)
     char *file_contents = (char *)malloc(filesize);
     if(file_contents == NULL)
     {
-        printf("malloc() failed\n");
+        perror("malloc() failed");
         return false;
     }
 
@@ -103,110 +220,6 @@ int load_file(const char *filename, char **buffer_out, int *filesize_out)
 
     return true;
 }
-//}
-
-/* sockets */
-//{
-
-// get sockaddr, IPv4 or IPv6:
-void *get_in_addr(struct sockaddr *sa)
-{
-	if(sa->sa_family == AF_INET)
-    {
-		return &(((struct sockaddr_in*)sa)->sin_addr);
-	}
-
-	return &(((struct sockaddr_in6*)sa)->sin6_addr);
-}
-
-int create_socket(const char *port)
-{
-    int status;
-
-	addrinfo hints;
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_flags = AI_PASSIVE; // use my IP
-
-    addrinfo *servinfo;
-    status = getaddrinfo(NULL, port, &hints, &servinfo);
-	if(status != 0)
-    {
-		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
-		return -1;
-	}
-
-	// loop through all the results and bind to the first we can
-    int sock_fd = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol);
-    if(sock_fd == -1)
-    {
-        perror("server: socket");
-        return -1;
-    }
-
-    int yes = 1;
-    if(setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1)
-    {
-        perror("setsockopt");
-        return -1;
-    }
-
-    if(bind(sock_fd, servinfo->ai_addr, servinfo->ai_addrlen) == -1)
-    {
-        close(sock_fd);
-        perror("server: bind");
-        return -1;
-    }
-
-	freeaddrinfo(servinfo); // all done with this structure
-
-	if(listen(sock_fd, BACKLOG) == -1)
-    {
-		perror("listen");
-        return -1;
-	}
-
-    return sock_fd;
-}
-
-int get_client(int sock_fd, const char *name = NULL)
-{
-    sockaddr_storage their_addr;
-    socklen_t sin_size = sizeof(their_addr);
-    int client_fd = accept(sock_fd, (sockaddr *)&their_addr, &sin_size);
-    if(client_fd == -1)
-    {
-        perror("accept");
-        return -1;
-    }
-
-    if(name != NULL)
-    {
-        char s[INET6_ADDRSTRLEN];
-        inet_ntop(their_addr.ss_family, get_in_addr((sockaddr *)&their_addr), s, sizeof(s));
-        printf("%s: got connection from %s\n", name, s);
-    }
-
-    return client_fd;
-}
-//}
-
-/* websockets */
-//{
-
-struct WebSocketFrame
-{
-    bool fin;
-    bool rsv1;
-    bool rsv2;
-    bool rsv3;
-    uint32_t opcode;
-    bool mask;
-    uint64_t payload_length;
-    uint8_t *mask_key; // 4 consecutive bytes
-    uint8_t *payload;
-};
 
 uint32_t left_rotate(uint32_t value, int rots)
 {
@@ -466,71 +479,315 @@ bool sha1(char *string, char *dest)
 
     return true;
 }
+//}
 
-bool receive_websocket_message(int socket_fd, uint8_t *dest)
+/* sockets */
+//{
+
+// get sockaddr, IPv4 or IPv6:
+void *get_in_addr(struct sockaddr *sa)
 {
-    // receive frame from client
-    uint8_t raw_websocket_frame[1024];
+	if(sa->sa_family == AF_INET)
     {
-        int websocket_frame_length = recv(socket_fd, (char *)raw_websocket_frame, sizeof(raw_websocket_frame), 0);
-        if(websocket_frame_length < 0)
-        {
-            perror("recv() failed");
-            return false;
-        }
+		return &(((struct sockaddr_in*)sa)->sin_addr);
+	}
+
+	return &(((struct sockaddr_in6*)sa)->sin6_addr);
+}
+
+int create_socket(const char *port)
+{
+    int status;
+
+	addrinfo hints;
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE; // use my IP
+
+    addrinfo *servinfo;
+    status = getaddrinfo(NULL, port, &hints, &servinfo);
+	if(status != 0)
+    {
+		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(status));
+		return -1;
+	}
+
+    int sock_fd = socket_(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol);
+    if(sock_fd == -1)
+    {
+        return -1;
     }
 
-    // fill out frame
-    WebSocketFrame frame = {};
+    int yes = 1;
+    if(setsockopt_(sock_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1)
     {
-        frame.fin = (raw_websocket_frame[0] & 0x80);
-        frame.rsv1 = (raw_websocket_frame[0] & 0x40);
-        frame.rsv2 = (raw_websocket_frame[0] & 0x20);
-        frame.rsv3 = (raw_websocket_frame[0] & 0x10);
-        frame.opcode = (raw_websocket_frame[0] & 0x0f);
-        frame.mask = (raw_websocket_frame[1] & 0x80);
+        return -1;
+    }
+
+    if(bind_(sock_fd, servinfo->ai_addr, servinfo->ai_addrlen) == -1)
+    {
+        return -1;
+    }
+
+	freeaddrinfo(servinfo); // all done with this structure
+
+	if(listen_(sock_fd, BACKLOG) == -1)
+    {
+        return -1;
+	}
+
+    return sock_fd;
+}
+
+int get_client(int sock_fd, const char *name = NULL)
+{
+    sockaddr_storage their_addr;
+    socklen_t sin_size = sizeof(their_addr);
+    int client_fd = accept_(sock_fd, (sockaddr *)&their_addr, &sin_size);
+    if(client_fd == -1)
+    {
+        return -1;
+    }
+
+    if(name != NULL)
+    {
+        char s[INET6_ADDRSTRLEN];
+        inet_ntop(their_addr.ss_family, get_in_addr((sockaddr *)&their_addr), s, sizeof(s));
+        printf("%s: got connection from %s\n", name, s);
+    }
+
+    return client_fd;
+}
+//}
+
+/* websockets */
+//{
+
+struct WebSocket
+{
+    int fd;
+
+    sem_t *messages_semaphore;
+
+    uint8_t *head;
+    uint8_t *tail;
+    uint8_t *end;
+    uint8_t buffer[KILOBYTES(16)];
+};
+
+struct WebSocketFrame
+{
+    bool fin;
+    bool rsv1;
+    bool rsv2;
+    bool rsv3;
+    uint32_t opcode;
+    bool mask;
+    uint64_t payload_length;
+    uint8_t *mask_key; // 4 consecutive bytes
+    uint8_t *payload;
+};
+
+WebSocketFrame inflate_frame(uint8_t *raw_frame)
+{
+    WebSocketFrame frame;
+    {
+        frame.fin = (raw_frame[0] & 0x80);
+        frame.rsv1 = (raw_frame[0] & 0x40);
+        frame.rsv2 = (raw_frame[0] & 0x20);
+        frame.rsv3 = (raw_frame[0] & 0x10);
+        frame.opcode = (raw_frame[0] & 0x0f);
+        frame.mask = (raw_frame[1] & 0x80);
 
         // calculate payload length
         {
-            frame.payload_length = (raw_websocket_frame[1] & 0x7f);
+            frame.payload_length = (raw_frame[1] & 0x7f);
             if(frame.payload_length <= 125)
             {
-                frame.mask_key = &raw_websocket_frame[2];
+                frame.mask_key = &raw_frame[2];
             }
             else if(frame.payload_length == 126)
             {
-                frame.payload_length = get16be(&raw_websocket_frame[2]);
-                frame.mask_key = &raw_websocket_frame[4];
+                frame.payload_length = get16be(&raw_frame[2]);
+                frame.mask_key = &raw_frame[4];
             }
             else if(frame.payload_length == 127)
             {
-                frame.payload_length = get64be(&raw_websocket_frame[2]);
-                frame.mask_key = &raw_websocket_frame[10];
+                frame.payload_length = get64be(&raw_frame[2]);
+                frame.mask_key = &raw_frame[10];
             }
         }
 
         frame.payload = (frame.mask_key + 4);
     }
+    return frame;
+}
 
-    // decode payload into user buffer
+bool init_websocket(WebSocket *socket, int fd)
+{
+    socket->fd = fd;
+    socket->head = socket->buffer;
+    socket->tail = socket->buffer;
+    socket->end = (socket->buffer + sizeof(socket->buffer));
+
+    socket->messages_semaphore = create_semaphore();
+    if(socket->messages_semaphore == SEM_FAILED)
     {
-        for(uint32_t i = 0; i < frame.payload_length; i++)
-        {
-            dest[i] = (frame.payload[i] ^ frame.mask_key[i % 4]);
-        }
-
-        // null terminate
-        dest[frame.payload_length] = 0;
+        return false;
     }
 
     return true;
 }
 
-bool send_websocket_message(int socket_fd, uint8_t *message, uint32_t message_length)
+bool create(WebSocket *socket, const char *port)
 {
+    int socket_fd = create_socket(port);
+    if(socket_fd == -1)
+    {
+        return false;
+    }
+
+    if(!init_websocket(socket, socket_fd))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+uint8_t *get_message_insertion_ptr(WebSocket *socket)
+{
+    uint8_t *tail = socket->tail;
+
+    // will the length overflow?
+    if((tail + sizeof(uint32_t)) > socket->end)
+    {
+        tail = socket->buffer;
+    }
+
+    // are we empty, or won't overflow?
+    if(socket->tail == socket->head ||
+       ((tail + sizeof(uint32_t)) <= socket->head))
+    {
+        return tail;
+    }
+
+    return NULL;
+}
+
+uint8_t *get_message_extraction_ptr(WebSocket *socket)
+{
+    uint8_t *head = socket->head;
+
+    // will the length overflow?
+    if((head + sizeof(uint32_t)) > socket->end)
+    {
+        head = socket->buffer;
+    }
+
+    return head;
+}
+
+int add_message(WebSocket *socket, uint8_t *message, const uint32_t message_length)
+{
+    uint8_t *message_length_ptr = get_message_insertion_ptr(socket);
+    if(message_length_ptr != NULL)
+    {
+        uint32_t actual_message_length = 0; // the length of the payload put in the socket's message buffer
+        socket->tail = (message_length_ptr + sizeof(uint32_t));
+
+        // copy the payload
+        {
+            uint32_t message_left = message_length;
+
+            if(socket->tail > socket->head)
+            {
+                uint32_t bytes_to_end = (socket->end - socket->tail);
+                uint32_t bytes_to_copy = min(message_left, bytes_to_end);
+                for(uint32_t i = 0; i < bytes_to_copy; i++)
+                {
+                    *socket->tail++ = *message++;
+                }
+                message_left -= bytes_to_copy;
+                assert(message_left >= 0);
+
+                if(message_left > 0)
+                {
+                    socket->tail = socket->buffer;
+                }
+                else
+                {
+                    // we're done!
+                    socket->tail += message_length;
+                }
+            }
+
+            if(message_left > 0)
+            {
+                uint32_t bytes_left = (socket->head - socket->tail);
+                uint32_t bytes_to_copy = min(message_left, bytes_left);
+                for(uint32_t i = 0; i < bytes_to_copy; i++)
+                {
+                    *socket->tail++ = *message++;
+                }
+                message_left -= bytes_to_copy;
+            }
+
+            actual_message_length = (message_length - message_left);
+        }
+
+        *(uint32_t *)message_length_ptr = actual_message_length;
+
+        sem_post_(socket->messages_semaphore);
+
+        return actual_message_length;;
+    }
+    else
+    {
+        return -1;
+    }
+}
+
+int recv(WebSocket *socket, uint8_t *dest)
+{
+    if(sem_wait_(socket->messages_semaphore) == -1)
+    {
+        return -1;
+    }
+
+    uint8_t *message_length_ptr = get_message_extraction_ptr(socket);
+    const uint32_t message_length = *(uint32_t *)message_length_ptr;
+    uint32_t message_left = message_length;
+    socket->head = (message_length_ptr + sizeof(uint32_t));
+
+    if(socket->head > socket->tail)
+    {
+        uint32_t bytes_to_end = (socket->end - socket->head);
+        memcpy(dest, socket->head, bytes_to_end);
+        dest += bytes_to_end;
+        message_left -= bytes_to_end;
+        socket->head = socket->buffer;
+    }
+
+    uint32_t bytes_left = (socket->tail - socket->head);
+    uint32_t bytes_to_copy = min(message_left, bytes_left);
+    memcpy(dest, socket->head, bytes_to_copy);
+    message_left -= bytes_to_copy;
+    socket->head += bytes_to_copy;
+
+    uint32_t message_copied = (message_length - message_left);
+    return message_copied;
+}
+
+bool send(WebSocket *socket, uint8_t *message, uint32_t message_length)
+{
+    int socket_fd = socket->fd;
+
     uint8_t frame[256] = {};
     assert(message_length < sizeof(frame));
 
+    // fill out frame
     int frame_length;
     {
         // set fin bit
@@ -559,17 +816,101 @@ bool send_websocket_message(int socket_fd, uint8_t *message, uint32_t message_le
         frame_length += message_length;
     }
 
-    if(send(socket_fd, frame, frame_length, 0) == -1)
+    if(send_(socket_fd, frame, frame_length, 0) == -1)
     {
-        perror("send() failed");
         return false;
     }
 
     return true;
 }
 
-bool close_websocket(int socket_fd)
+void *background_websocket_client_thread_entry(void *thread_data);
+bool get_client(WebSocket *socket, WebSocket *client_socket)
 {
+    int socket_fd = socket->fd;
+
+    int client_fd = get_client(socket_fd);
+    if(client_fd == -1)
+    {
+        return -1;
+    }
+
+    char client_handshake[4096];
+    int client_handshake_length = 0;
+    {
+        int client_handshake_length = recv_(client_fd, client_handshake, sizeof(client_handshake), 0);
+        if(client_handshake_length == -1)
+        {
+            return -1;
+        }
+
+        client_handshake[client_handshake_length] = 0;
+    }
+
+    char client_handshake_reply[512] =
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Accept: ";
+    {
+        char reply_key[128];
+        {
+            char client_key[128];
+            {
+                char *start_of_key = NULL;
+                for(unsigned int i = 0; i < (client_handshake_length - WEBSOCKET_KEY_HEADER_LENGTH); i++)
+                {
+                    if(!strncmp(&client_handshake[i], WEBSOCKET_KEY_HEADER, WEBSOCKET_KEY_HEADER_LENGTH))
+                    {
+                        start_of_key = &client_handshake[i + WEBSOCKET_KEY_HEADER_LENGTH];
+                        break;
+                    }
+                }
+
+                // place key in buffer
+                int length = 0;
+                while(*start_of_key != '\r')
+                {
+                    client_key[length++] = *start_of_key++;
+                }
+                client_key[length] = 0;
+            }
+
+            strcat(client_key, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+
+            if(!sha1(client_key, reply_key))
+            {
+                return -1;
+            }
+        }
+
+        // fill out key for our handshake reply
+        int handshake_reply_length = strlen(client_handshake_reply);
+        strcat(&client_handshake_reply[handshake_reply_length], reply_key);
+        handshake_reply_length += strlen(reply_key);
+        client_handshake_reply[handshake_reply_length++] = '\r';
+        client_handshake_reply[handshake_reply_length++] = '\n';
+        client_handshake_reply[handshake_reply_length++] = '\r';
+        client_handshake_reply[handshake_reply_length++] = '\n';
+        client_handshake_reply[handshake_reply_length++] = 0;
+    }
+
+    if(send_(client_fd, client_handshake_reply, strlen(client_handshake_reply), 0) == -1) 
+    {
+        return -1;
+    }
+
+    init_websocket(client_socket, client_fd);
+
+    pthread_create(&thread_pool[thread_pool_size++], NULL, background_websocket_client_thread_entry, client_socket);
+
+    return true;
+}
+
+bool send_close(WebSocket *socket)
+{
+    int socket_fd = socket->fd;
+
     uint8_t frame[2] = {};
     int frame_length;
     {
@@ -582,40 +923,41 @@ bool close_websocket(int socket_fd)
         frame_length = 2;
     }
 
-    // send our close frame
+    if(send_(socket_fd, frame, frame_length, 0) == -1)
     {
-        if(send(socket_fd, frame, frame_length, 0) == -1)
-        {
-            perror("send() failed");
-            return false;
-        }
+        return false;
     }
 
-    // keep receiving frames until we receive the close frame response
-    {
-        while(1)
-        {
-            if(recv(socket_fd, frame, frame_length, 0) == -1)
-            {
-                perror("recv() failed");
-                return false;
-            }
-
-            // check the opcode. is it close?
-            if((frame[0] & 0x0f) == 0x08)
-            {
-                break;
-            }
-        }
-    }
-
-    // we're all done!
-    {
-        close(socket_fd);
-    }
+    return true;
 }
 
-void print_websocket_frame(WebSocketFrame frame)
+bool close(WebSocket *socket)
+{
+    int socket_fd = socket->fd;
+
+    send_close(socket);
+
+    // receive frames until we receive the close frame response
+    while(1)
+    {
+        uint8_t frame[256];
+        if(recv_(socket_fd, frame, sizeof(frame), 0) == -1)
+        {
+            return false;
+        }
+
+        if((frame[0] & 0x0f) == 0x08)
+        {
+            break;
+        }
+    }
+
+    close_(socket_fd);
+
+    return true;
+}
+
+void print(WebSocketFrame frame)
 {
     printf("fin: 0x%x, rsv1: 0x%x, rsv2: 0x%x, rsv3: 0x%x, opcode: 0x%x, mask: 0x%x, "
            "payload_length: %llu, mask[0]: 0x%x, mask[1]: 0x%x, mask[2]: 0x%x, mask[3]: 0x%x\n", 
@@ -623,179 +965,115 @@ void print_websocket_frame(WebSocketFrame frame)
            frame.payload_length, frame.mask_key[0], frame.mask_key[1], frame.mask_key[2], frame.mask_key[3]);
 }
 
-int get_websocket_client(int sock_fd)
+void *background_websocket_client_thread_entry(void *thread_data)
 {
-    int client_fd;
+    WebSocket *socket = (WebSocket *)thread_data;
+    int socket_fd = socket->fd;
+
+    while(1)
     {
-        // get a client
+        uint8_t raw_frame[1024];
+        int frame_length = recv_(socket_fd, (char *)raw_frame, sizeof(raw_frame), 0);
+        if(frame_length < 0)
         {
-            client_fd = get_client(sock_fd);
-            if(client_fd == -1)
-            {
-                return -1;
-            }
+            exit(1);
         }
 
-        // receive client handshake
-        char client_handshake[4096];
-        int client_handshake_length = 0;
-        {
-            int client_handshake_length = recv(client_fd, client_handshake, sizeof(client_handshake), 0);
-            if(client_handshake_length == -1)
-            {
-                perror("recv() failed");
-                return -1;
-            }
+        const WebSocketFrame frame = inflate_frame(raw_frame);
 
-            client_handshake[client_handshake_length] = 0;
+        if(frame.opcode == OPCODE_CONNECTION_CLOSE)
+        {
+            printf("received a close\n");
+            send_close(socket);
+            return 0;
         }
 
-        // fill out our handshake
-        char client_handshake_reply[512] =
-            "HTTP/1.1 101 Switching Protocols\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            "Sec-WebSocket-Accept: ";
+        // decode
+        for(uint32_t i = 0; i < frame.payload_length; i++)
         {
-            // get reply key
-            char reply_key[128];
-            {
-                // get client key
-                char client_key[128];// = "dGhlIHNhbXBsZSBub25jZQ==";
-                {
-                    char *start_of_key = NULL;
-                    {
-                        for(unsigned int i = 0; i < (client_handshake_length - WEBSOCKET_KEY_HEADER_LENGTH); i++)
-                        {
-                            if(!strncmp(&client_handshake[i], WEBSOCKET_KEY_HEADER, WEBSOCKET_KEY_HEADER_LENGTH))
-                            {
-                                start_of_key = &client_handshake[i + WEBSOCKET_KEY_HEADER_LENGTH];
-                                break;
-                            }
-                        }
-                    }
-
-                    // place key in buffer
-                    {
-                        int length = 0;
-                        while(*start_of_key != '\r')
-                        {
-                            client_key[length++] = *start_of_key++;
-                        }
-                        client_key[length] = 0;
-                    }
-                }
-
-                // concatenate
-                {
-                    strcat(client_key, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-                }
-
-                // take SHA-1 hash in base64
-                {
-                    if(!sha1(client_key, reply_key))
-                    {
-                        return -1;
-                    }
-                }
-            }
-
-            // fill out key for client handshake
-            {
-                int handshake_reply_length = strlen(client_handshake_reply);
-                strcat(&client_handshake_reply[handshake_reply_length], reply_key);
-                handshake_reply_length += strlen(reply_key);
-                client_handshake_reply[handshake_reply_length++] = '\r';
-                client_handshake_reply[handshake_reply_length++] = '\n';
-                client_handshake_reply[handshake_reply_length++] = '\r';
-                client_handshake_reply[handshake_reply_length++] = '\n';
-                client_handshake_reply[handshake_reply_length++] = 0;
-            }
+            frame.payload[i] ^= frame.mask_key[i % 4];
         }
 
-        // send the handshake reply
+        if(add_message(socket, frame.payload, frame.payload_length) != (int)frame.payload_length)
         {
-            if(send(client_fd, client_handshake_reply, strlen(client_handshake_reply), 0) == -1) 
-            {
-                perror("send() failed");
-                return -1;
-            }
-        }
-
-        // perform basic test
-        {
-            // get message from client
-            uint8_t test_message[256];
-            {
-                if(!receive_websocket_message(client_fd, test_message))
-                {
-                    return -1;
-                }
-            }
-
-            if(strcmp((char *)test_message, "this is a test"))
-            {
-                fprintf(stderr, "websocket basic test failed\n");
-                return -1;
-            }
-
-            // send our message
-            {
-                strcat((char *)test_message, " - received!");
-                if(!send_websocket_message(client_fd, test_message, strlen((char *)test_message)))
-                {
-                    return -1;
-                }
-            }
+            printf("failed to add message\n");
         }
     }
-    return client_fd;
+
+    return 0;
 }
 //}
 
+void *client_websocket_thread_entry(void *thread_data)
+{
+    WebSocket *socket = (WebSocket *)thread_data;
+
+#if 1
+    // perform basic test
+    {
+        uint8_t test_message[256];
+        int recv_length = recv(socket, test_message);
+        if(recv_length == -1)
+        {
+            exit(1);
+        }
+
+        printf("test message: %s\n", test_message);
+
+        if(strcmp((char *)test_message, "this is a test"))
+        {
+            fprintf(stderr, "websocket basic test failed\n");
+            exit(1);
+        }
+
+        strcat((char *)test_message, " - received!");
+        if(!send(socket, test_message, strlen((char *)test_message)))
+        {
+            exit(1);
+        }
+    }
+
+    printf("basic test passed\n");
+#endif
+
+#if 0
+    while(1)
+    {
+        uint8_t message[256];
+        int message_length = recv(socket, message);
+        if(message_length == -1)
+        {
+            exit(1);
+        }
+        message[message_length] = 0;
+
+        printf("socket message received (%d bytes): %s\n", strlen((char *)message), (char *)message);
+
+        strcat((char *)message, " - received!");
+        if(!send(socket, message, strlen((char *)message)))
+        {
+            exit(1);
+        }
+    }
+#endif
+
+    return 0;
+}
+
 void *stream_thread_entry(void *data)
 {
-    WebSocket socket = create_websocket(VIDEO_STREAM_PORT);
-    char *message = receive(socket);
-    send(socket, message);
-    close(socket);
-
-    int sock_fd = create_socket(VIDEO_STREAM_PORT);
-    if(sock_fd == -1)
+    WebSocket socket;
+    if(!create(&socket, VIDEO_STREAM_PORT))
     {
         exit(1);
     }
 
-    int client_fd = get_websocket_client(sock_fd);
-    if(client_fd == -1)
+    WebSocket clients[10];
+    int num_clients = 0;
+    while(1)
     {
-        exit(1);
-    }
-
-    // start receiving stuff
-    {
-        while(1)
-        {
-            // get message client
-            uint8_t message[256];
-            {
-                if(!receive_websocket_message(client_fd, message))
-                {
-                    exit(1);
-                }
-            }
-
-            printf("socket message received (%d bytes): %s\n", strlen((char *)message), (char *)message);
-
-            // send it back
-            {
-                strcat((char *)message, " - received!");
-                if(!send_websocket_message(client_fd, message, strlen((char *)message)))
-                {
-                    exit(1);
-                }
-            }
-        }
+        get_client(&socket, &clients[num_clients]);
+        pthread_create(&thread_pool[thread_pool_size++], NULL, client_websocket_thread_entry, &clients[num_clients++]);
     }
 
     return 0;
@@ -803,8 +1081,7 @@ void *stream_thread_entry(void *data)
 
 int main(void)
 {
-    pthread_t stream_thread;
-    pthread_create(&stream_thread, NULL, stream_thread_entry, NULL);
+    pthread_create(&thread_pool[thread_pool_size++], NULL, stream_thread_entry, NULL);
 
     int sock_fd = create_socket(WEBSERVER_PORT);
     if(sock_fd == -1)
@@ -829,43 +1106,12 @@ int main(void)
             exit(1);
         }
 
-        if(send(client_fd, webpage, webpage_size, 0) == -1) 
+        if(send_(client_fd, webpage, webpage_size, 0) == -1) 
         {
-            perror("send");
             exit(1);
         }
-        close(client_fd);
+        close_(client_fd);
     }
-
-#if 0
-    // main accept() loop
-	while(1)
-    {  
-		sin_size = sizeof(their_addr);
-		new_fd = accept(sock_fd, (struct sockaddr *)&their_addr, &sin_size);
-		if(new_fd == -1)
-        {
-			perror("accept");
-			continue;
-		}
-
-		inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr), s, sizeof(s));
-		printf("server: got connection from %s\n", s);
-
-        // are we the child process?
-		if(!fork())
-        {
-			close(sock_fd); // child doesn't need the listener
-			if(send(new_fd, "Hello, world!", 13, 0) == -1) 
-            {
-				perror("send");
-            }
-			close(new_fd);
-			exit(0);
-		}
-		close(new_fd);  // parent doesn't need this
-	}
-#endif
 
 	return 0;
 }
