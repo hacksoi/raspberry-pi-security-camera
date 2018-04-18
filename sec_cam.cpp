@@ -561,19 +561,239 @@ int get_client(int sock_fd, const char *name = NULL)
 }
 //}
 
+/* message buffer */
+//{
+
+/* Thread-safe circular buffer */
+struct MessageBuffer
+{
+    // NOTE:
+    //  -an empty message buffer means (head == tail_
+    //  -a full message buffer means (tail + 1 == head)
+    //  -we define the end of the buffer to be the beginning. it's easier to just increment 
+    //   the head or tail (when adding or removing a message) and just leave it at the end. 
+
+    sem_t *semaphore;
+
+    uint8_t *head;
+    uint8_t *tail;
+    uint8_t *end;
+    uint8_t buffer[KILOBYTES(16)];
+};
+
+bool init(MessageBuffer *message_buffer)
+{
+    message_buffer->end = (message_buffer->buffer + sizeof(message_buffer->buffer));
+    message_buffer->head = message_buffer->end;
+    message_buffer->tail = message_buffer->end;
+    message_buffer->semaphore = create_semaphore();
+    if(message_buffer->semaphore == SEM_FAILED)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+/* Returns number of bytes of message added. */
+int add(MessageBuffer *message_buffer, uint8_t *message, const uint32_t message_size)
+{
+    if(message_size > sizeof(message_buffer->buffer))
+    {
+        return -1;
+    }
+
+    const uint8_t *head = message_buffer->head;
+
+    // do we have room?
+    {
+        uint32_t bytes_left = 0;
+        if(message_buffer->tail >= head)
+        {
+            bytes_left += (message_buffer->end - message_buffer->tail);
+        }
+        bytes_left += (head - message_buffer->buffer - 1);
+
+        if(message_size > bytes_left)
+        {
+            return -1;
+        }
+    }
+
+    // get pointers
+    uint8_t *message_size_ptr = message_buffer->tail;
+    uint8_t *message_ptr;
+    {
+        // does the size wrap?
+        if((message_size_ptr + sizeof(uint32_t)) > message_buffer->end)
+        {
+            // are we behind the head?
+            if(message_size_ptr < head)
+            {
+                // the head is between us and the end. if we wrapped, we'd go past it
+                return -1;
+            }
+            // we're in front of the head
+            else
+            {
+                message_size_ptr = message_buffer->buffer;
+            }
+
+            message_ptr = (message_size_ptr + sizeof(uint32_t));
+        }
+        // the size doesn't wrap
+        else
+        {
+            message_ptr = (message_size_ptr + sizeof(uint32_t));
+
+            // is the message at the very end?
+            if(message_ptr == message_buffer->end)
+            {
+                message_ptr = message_buffer->buffer;
+            }
+            // the message isn't at the very end. this is the normal case
+            else
+            {
+                // we're done
+            }
+        }
+
+        // will we go at or past the head?
+        if((message_ptr + sizeof(uint8_t)) >= head)
+        {
+            return -1;
+        }
+    }
+
+    *(uint32_t *)message_size_ptr = message_size;
+
+    // copy payload
+    uint8_t *tail = message_ptr;
+    {
+        uint32_t message_left = message_size;
+
+        if(tail > head)
+        {
+            uint32_t bytes_to_end = (message_buffer->end - tail);
+            uint32_t bytes_to_copy = min(message_left, bytes_to_end);
+            memcpy(tail, message, bytes_to_copy);
+            message += bytes_to_copy;
+            message_left -= bytes_to_copy;
+            if(message_left > 0)
+            {
+                tail = message_buffer->buffer;
+            }
+            else
+            {
+                // we're done!
+                tail += message_size;
+            }
+        }
+
+        if(message_left > 0)
+        {
+            memcpy(tail, message, message_left);
+            tail += message_left;
+        }
+    }
+    message_buffer->tail = tail;
+
+    if(sem_post_(message_buffer->semaphore) == -1)
+    {
+        return -1;
+    }
+
+    return message_size;
+}
+
+int get(MessageBuffer *message_buffer, uint8_t *dest, uint32_t dest_size)
+{
+    if(sem_wait_(message_buffer->semaphore) == -1)
+    {
+        return -1;
+    }
+
+    const uint8_t *tail = message_buffer->tail;
+
+    // get pointers
+    uint8_t *message_size_ptr = message_buffer->head;
+    uint8_t *message_ptr;
+    {
+        // does the size wrap?
+        if((message_size_ptr + sizeof(uint32_t)) > message_buffer->end)
+        {
+            message_size_ptr = message_buffer->buffer;
+            message_ptr = (message_size_ptr + sizeof(uint32_t));
+        }
+        // the size doesn't wrap
+        else
+        {
+            message_ptr = (message_size_ptr + sizeof(uint32_t));
+
+            // is the message at the very end?
+            if(message_ptr == message_buffer->end)
+            {
+                message_ptr = message_buffer->buffer;
+            }
+            // the message isn't at the very end. this is the normal case
+            else
+            {
+                // we're done
+            }
+        }
+    }
+
+    const uint32_t message_size = *(uint32_t *)message_size_ptr;
+
+    // copy payload
+    uint8_t *head = message_ptr;
+    {
+        uint32_t message_left = message_size;
+        uint32_t dest_left = dest_size;
+
+        if(head > tail)
+        {
+            uint32_t bytes_to_end = (message_buffer->end - head);
+            uint32_t bytes_to_copy = min(dest_left, min(message_left, bytes_to_end));
+            memcpy(dest, head, bytes_to_copy);
+            dest += bytes_to_copy;
+            dest_left -= bytes_to_copy;
+            message_left -= bytes_to_copy;
+
+            if((dest_left > 0) &&
+               (message_left > 0))
+            {
+                head = message_buffer->buffer;
+            }
+            else
+            {
+                // we're done
+                head += bytes_to_copy;
+            }
+        }
+
+        if((dest_left > 0) &&
+           (message_left > 0))
+        {
+            uint32_t bytes_left = (tail - head);
+            uint32_t bytes_to_copy = min(dest_left, min(message_left, bytes_left));
+            memcpy(dest, head, bytes_to_copy);
+            head += bytes_to_copy;
+        }
+    }
+    message_buffer->head = head;
+
+    return message_size;
+}
+//}
+
 /* websockets */
 //{
 
 struct WebSocket
 {
     int fd;
-
-    sem_t *messages_semaphore;
-
-    uint8_t *head;
-    uint8_t *tail;
-    uint8_t *end;
-    uint8_t buffer[KILOBYTES(16)];
+    MessageBuffer message_buffer;
 };
 
 struct WebSocketFrame
@@ -624,19 +844,13 @@ WebSocketFrame inflate_frame(uint8_t *raw_frame)
     return frame;
 }
 
-bool init_websocket(WebSocket *socket, int fd)
+bool init(WebSocket *socket, int fd)
 {
     socket->fd = fd;
-    socket->head = socket->buffer;
-    socket->tail = socket->buffer;
-    socket->end = (socket->buffer + sizeof(socket->buffer));
-
-    socket->messages_semaphore = create_semaphore();
-    if(socket->messages_semaphore == SEM_FAILED)
+    if(!init(&socket->message_buffer))
     {
         return false;
     }
-
     return true;
 }
 
@@ -648,7 +862,7 @@ bool create(WebSocket *socket, const char *port)
         return false;
     }
 
-    if(!init_websocket(socket, socket_fd))
+    if(!init(socket, socket_fd))
     {
         return false;
     }
@@ -656,128 +870,10 @@ bool create(WebSocket *socket, const char *port)
     return true;
 }
 
-uint8_t *get_message_insertion_ptr(WebSocket *socket)
+int recv(WebSocket *socket, uint8_t *dest, uint32_t dest_size)
 {
-    uint8_t *tail = socket->tail;
-
-    // will the length overflow?
-    if((tail + sizeof(uint32_t)) > socket->end)
-    {
-        tail = socket->buffer;
-    }
-
-    // are we empty, or won't overflow?
-    if(socket->tail == socket->head ||
-       ((tail + sizeof(uint32_t)) <= socket->head))
-    {
-        return tail;
-    }
-
-    return NULL;
-}
-
-uint8_t *get_message_extraction_ptr(WebSocket *socket)
-{
-    uint8_t *head = socket->head;
-
-    // will the length overflow?
-    if((head + sizeof(uint32_t)) > socket->end)
-    {
-        head = socket->buffer;
-    }
-
-    return head;
-}
-
-int add_message(WebSocket *socket, uint8_t *message, const uint32_t message_length)
-{
-    uint8_t *message_length_ptr = get_message_insertion_ptr(socket);
-    if(message_length_ptr != NULL)
-    {
-        uint32_t actual_message_length = 0; // the length of the payload put in the socket's message buffer
-        socket->tail = (message_length_ptr + sizeof(uint32_t));
-
-        // copy the payload
-        {
-            uint32_t message_left = message_length;
-
-            if(socket->tail > socket->head)
-            {
-                uint32_t bytes_to_end = (socket->end - socket->tail);
-                uint32_t bytes_to_copy = min(message_left, bytes_to_end);
-                for(uint32_t i = 0; i < bytes_to_copy; i++)
-                {
-                    *socket->tail++ = *message++;
-                }
-                message_left -= bytes_to_copy;
-                assert(message_left >= 0);
-
-                if(message_left > 0)
-                {
-                    socket->tail = socket->buffer;
-                }
-                else
-                {
-                    // we're done!
-                    socket->tail += message_length;
-                }
-            }
-
-            if(message_left > 0)
-            {
-                uint32_t bytes_left = (socket->head - socket->tail);
-                uint32_t bytes_to_copy = min(message_left, bytes_left);
-                for(uint32_t i = 0; i < bytes_to_copy; i++)
-                {
-                    *socket->tail++ = *message++;
-                }
-                message_left -= bytes_to_copy;
-            }
-
-            actual_message_length = (message_length - message_left);
-        }
-
-        *(uint32_t *)message_length_ptr = actual_message_length;
-
-        sem_post_(socket->messages_semaphore);
-
-        return actual_message_length;;
-    }
-    else
-    {
-        return -1;
-    }
-}
-
-int recv(WebSocket *socket, uint8_t *dest)
-{
-    if(sem_wait_(socket->messages_semaphore) == -1)
-    {
-        return -1;
-    }
-
-    uint8_t *message_length_ptr = get_message_extraction_ptr(socket);
-    const uint32_t message_length = *(uint32_t *)message_length_ptr;
-    uint32_t message_left = message_length;
-    socket->head = (message_length_ptr + sizeof(uint32_t));
-
-    if(socket->head > socket->tail)
-    {
-        uint32_t bytes_to_end = (socket->end - socket->head);
-        memcpy(dest, socket->head, bytes_to_end);
-        dest += bytes_to_end;
-        message_left -= bytes_to_end;
-        socket->head = socket->buffer;
-    }
-
-    uint32_t bytes_left = (socket->tail - socket->head);
-    uint32_t bytes_to_copy = min(message_left, bytes_left);
-    memcpy(dest, socket->head, bytes_to_copy);
-    message_left -= bytes_to_copy;
-    socket->head += bytes_to_copy;
-
-    uint32_t message_copied = (message_length - message_left);
-    return message_copied;
+    int message_length = get(&socket->message_buffer, dest, dest_size);
+    return message_length;
 }
 
 bool send(WebSocket *socket, uint8_t *message, uint32_t message_length)
@@ -900,7 +996,10 @@ bool get_client(WebSocket *socket, WebSocket *client_socket)
         return -1;
     }
 
-    init_websocket(client_socket, client_fd);
+    if(!init(client_socket, client_fd))
+    {
+        return false;
+    }
 
     pthread_create(&thread_pool[thread_pool_size++], NULL, background_websocket_client_thread_entry, client_socket);
 
@@ -994,7 +1093,7 @@ void *background_websocket_client_thread_entry(void *thread_data)
             frame.payload[i] ^= frame.mask_key[i % 4];
         }
 
-        if(add_message(socket, frame.payload, frame.payload_length) != (int)frame.payload_length)
+        if(add(&socket->message_buffer, frame.payload, frame.payload_length) != (int)frame.payload_length)
         {
             printf("failed to add message\n");
         }
@@ -1004,7 +1103,7 @@ void *background_websocket_client_thread_entry(void *thread_data)
 }
 //}
 
-void *client_websocket_thread_entry(void *thread_data)
+void *websocket_client_thread_entry(void *thread_data)
 {
     WebSocket *socket = (WebSocket *)thread_data;
 
@@ -1012,8 +1111,8 @@ void *client_websocket_thread_entry(void *thread_data)
     // perform basic test
     {
         uint8_t test_message[256];
-        int recv_length = recv(socket, test_message);
-        if(recv_length == -1)
+        int message_length = recv(socket, test_message, sizeof(test_message));
+        if(message_length == -1)
         {
             exit(1);
         }
@@ -1073,7 +1172,7 @@ void *stream_thread_entry(void *data)
     while(1)
     {
         get_client(&socket, &clients[num_clients]);
-        pthread_create(&thread_pool[thread_pool_size++], NULL, client_websocket_thread_entry, &clients[num_clients++]);
+        pthread_create(&thread_pool[thread_pool_size++], NULL, websocket_client_thread_entry, &clients[num_clients++]);
     }
 
     return 0;
