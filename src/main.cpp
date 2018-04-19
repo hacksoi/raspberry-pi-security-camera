@@ -81,26 +81,26 @@ int create_socket(const char *port)
 		return -1;
 	}
 
-    int sock_fd = socket_(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol);
+    int sock_fd = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol);
     if(sock_fd == -1)
     {
         return -1;
     }
 
     int yes = 1;
-    if(setsockopt_(sock_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1)
+    if(setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1)
     {
         return -1;
     }
 
-    if(bind_(sock_fd, servinfo->ai_addr, servinfo->ai_addrlen) == -1)
+    if(bind(sock_fd, servinfo->ai_addr, servinfo->ai_addrlen) == -1)
     {
         return -1;
     }
 
 	freeaddrinfo(servinfo); // all done with this structure
 
-	if(listen_(sock_fd, BACKLOG) == -1)
+	if(listen(sock_fd, BACKLOG) == -1)
     {
         return -1;
 	}
@@ -112,7 +112,7 @@ int get_client(int sock_fd, const char *name = NULL)
 {
     sockaddr_storage their_addr;
     socklen_t sin_size = sizeof(their_addr);
-    int client_fd = accept_(sock_fd, (sockaddr *)&their_addr, &sin_size);
+    int client_fd = accept(sock_fd, (sockaddr *)&their_addr, &sin_size);
     if(client_fd == -1)
     {
         return -1;
@@ -254,7 +254,7 @@ bool send(WebSocket *socket, uint8_t *message, uint32_t message_length)
         frame_length += message_length;
     }
 
-    if(send_(socket_fd, frame, frame_length, 0) == -1)
+    if(send(socket_fd, frame, frame_length, 0) == -1)
     {
         return false;
     }
@@ -265,9 +265,8 @@ bool send(WebSocket *socket, uint8_t *message, uint32_t message_length)
 void *background_websocket_client_thread_entry(void *thread_data);
 bool get_client(WebSocket *socket, WebSocket *client_socket)
 {
-    int socket_fd = socket->fd;
-
-    int client_fd = get_client(socket_fd);
+    const int socket_fd = socket->fd;
+    const int client_fd = get_client(socket_fd);
     if(client_fd == -1)
     {
         return -1;
@@ -276,7 +275,7 @@ bool get_client(WebSocket *socket, WebSocket *client_socket)
     char client_handshake[4096];
     int client_handshake_length = 0;
     {
-        int client_handshake_length = recv_(client_fd, client_handshake, sizeof(client_handshake), 0);
+        int client_handshake_length = recv(client_fd, client_handshake, sizeof(client_handshake), 0);
         if(client_handshake_length == -1)
         {
             return -1;
@@ -333,7 +332,7 @@ bool get_client(WebSocket *socket, WebSocket *client_socket)
         client_handshake_reply[handshake_reply_length++] = 0;
     }
 
-    if(send_(client_fd, client_handshake_reply, strlen(client_handshake_reply), 0) == -1) 
+    if(send(client_fd, client_handshake_reply, strlen(client_handshake_reply), 0) == -1) 
     {
         return -1;
     }
@@ -364,7 +363,7 @@ bool send_close(WebSocket *socket)
         frame_length = 2;
     }
 
-    if(send_(socket_fd, frame, frame_length, 0) == -1)
+    if(send(socket_fd, frame, frame_length, 0) == -1)
     {
         return false;
     }
@@ -382,7 +381,7 @@ bool close(WebSocket *socket)
     while(1)
     {
         uint8_t frame[256];
-        if(recv_(socket_fd, frame, sizeof(frame), 0) == -1)
+        if(recv(socket_fd, frame, sizeof(frame), 0) == -1)
         {
             return false;
         }
@@ -393,7 +392,7 @@ bool close(WebSocket *socket)
         }
     }
 
-    close_(socket_fd);
+    close(socket_fd);
 
     return true;
 }
@@ -414,7 +413,7 @@ void *background_websocket_client_thread_entry(void *thread_data)
     while(1)
     {
         uint8_t raw_frame[1024];
-        int frame_length = recv_(socket_fd, (char *)raw_frame, sizeof(raw_frame), 0);
+        int frame_length = recv(socket_fd, (char *)raw_frame, sizeof(raw_frame), 0);
         if(frame_length < 0)
         {
             exit(1);
@@ -547,11 +546,11 @@ int main(void)
             exit(1);
         }
 
-        if(send_(client_fd, webpage, webpage_size, 0) == -1) 
+        if(send(client_fd, webpage, webpage_size, 0) == -1) 
         {
             exit(1);
         }
-        close_(client_fd);
+        close(client_fd);
     }
 
 	return 0;

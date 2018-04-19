@@ -2,6 +2,7 @@
 #define MESSAGE_BUFFER_H
 
 #include "common.h"
+#include "posix_wrappers.h"
 
 #include <stdint.h>
 #include <semaphore.h>
@@ -16,89 +17,155 @@ struct MessageBuffer
     //  -we define the end of the buffer to be the beginning. it's easier to just increment 
     //   the head or tail (when adding or removing a message) and just leave it at the end. 
 
-    sem_t semaphore;
+    sem_t read_write_semaphore;
+    sem_t read_semaphore;
+    sem_t write_semaphore;
 
+    uint32_t size;
+    uint8_t *buffer;
+    uint8_t *end;
     uint8_t *head;
     uint8_t *tail;
-    uint8_t *end;
-    uint8_t buffer[KILOBYTES(16)];
 };
 
-bool init(MessageBuffer *message_buffer)
+void print(MessageBuffer *message_buffer)
 {
-    message_buffer->end = (message_buffer->buffer + sizeof(message_buffer->buffer));
-    message_buffer->head = message_buffer->end;
-    message_buffer->tail = message_buffer->end;
-    if(sem_init_(&message_buffer->semaphore, 0, 0) == -1)
+    printf("message_buffer: start: %p, end: %p, head: %p, tail: %p\n",
+           message_buffer->buffer, message_buffer->end, message_buffer->head, message_buffer->tail);
+}
+
+bool init(MessageBuffer *message_buffer, uint32_t size = KILOBYTES(4))
+{
+    message_buffer->size = size;
+    message_buffer->buffer = (uint8_t *)malloc(size);
+    if(message_buffer->buffer == NULL)
     {
+        DEBUG_PRINT_INFO();
         return false;
     }
+    message_buffer->end = (message_buffer->buffer + size);
+    message_buffer->head = message_buffer->end;
+    message_buffer->tail = message_buffer->end;
+
+    if(sem_init(&message_buffer->read_write_semaphore, 0, 0) == -1)
+    {
+        DEBUG_PRINT_INFO();
+        return false;
+    }
+
     return true;
+}
+
+void destroy(MessageBuffer *message_buffer)
+{
+    free(message_buffer->buffer);
+    sem_close(&message_buffer->read_write_semaphore);
+}
+
+bool is_empty(MessageBuffer *message_buffer)
+{
+    bool result = (message_buffer->head == message_buffer->tail);
+    return result;
+}
+
+/* Returns whether there's enough room. We pass the head in case the MessageBuffer's
+   head changes in between the call. */
+bool get_message_insertion_pointers(MessageBuffer *message_buffer, const uint8_t *head, 
+                                    const uint32_t message_size, 
+                                    uint8_t **_message_size_ptr, uint8_t **_message_ptr)
+{
+    uint8_t *message_size_ptr = message_buffer->tail;
+    uint8_t *message_ptr;
+
+    // does the size wrap?
+    if((message_size_ptr + sizeof(uint32_t)) > message_buffer->end)
+    {
+        if(message_size_ptr < head)
+        {
+            // the head is between us and the end. if we wrapped, we'd go past it
+            DEBUG_PRINT_INFO();
+            return false;
+        }
+        else
+        {
+            message_size_ptr = message_buffer->buffer;
+        }
+
+        message_ptr = (message_size_ptr + sizeof(uint32_t));
+    }
+    else
+    {
+        message_ptr = (message_size_ptr + sizeof(uint32_t));
+
+        // is the message at the very end?
+        if(message_ptr == message_buffer->end)
+        {
+            message_ptr = message_buffer->buffer;
+        }
+        else
+        {
+            // we're done
+        }
+    }
+
+    // do we have room?
+    {
+        uint32_t bytes_left = 0;
+        if(message_ptr >= head)
+        {
+            bytes_left += (message_buffer->end - message_ptr);
+        }
+        bytes_left += ((head - message_buffer->buffer - 1) - sizeof(uint32_t));
+
+        if(message_size > bytes_left)
+        {
+#if 0
+            print(message_buffer);
+            printf("message size: %d\n", message_size);
+            DEBUG_PRINT_INFO();
+#endif
+            return false;
+        }
+    }
+
+    if((_message_size_ptr != NULL) && (_message_ptr != NULL))
+    {
+        *_message_size_ptr = message_size_ptr;
+        *_message_ptr = message_ptr;
+    }
+
+    return true;
+}
+
+bool check_has_room(MessageBuffer *message_buffer, uint32_t message_size)
+{
+    bool has_room = get_message_insertion_pointers(message_buffer, message_buffer->head, 
+                                                   message_size, NULL, NULL);
+    return has_room;
 }
 
 /* Returns number of bytes of message added. */
 int add(MessageBuffer *message_buffer, uint8_t *message, const uint32_t message_size)
 {
-    if(message_size > sizeof(message_buffer->buffer))
+    if(message_size == 0)
     {
+        DEBUG_PRINT_INFO();
+        return 0;
+    }
+
+    if(message_size > message_buffer->size)
+    {
+        DEBUG_PRINT_INFO();
         return -1;
     }
 
     const uint8_t *head = message_buffer->head;
 
-    // do we have room?
+    uint8_t *message_size_ptr, *message_ptr;
+    if(!get_message_insertion_pointers(message_buffer, message_buffer->tail, 
+                                       message_size, &message_size_ptr, &message_ptr))
     {
-        uint32_t bytes_left = 0;
-        if(message_buffer->tail >= head)
-        {
-            bytes_left += (message_buffer->end - message_buffer->tail);
-        }
-        bytes_left += (head - message_buffer->buffer - 1);
-
-        if(message_size > bytes_left)
-        {
-            return -1;
-        }
-    }
-
-    uint8_t *message_size_ptr = message_buffer->tail;
-    uint8_t *message_ptr;
-    {
-        // does the size wrap?
-        if((message_size_ptr + sizeof(uint32_t)) > message_buffer->end)
-        {
-            if(message_size_ptr < head)
-            {
-                // the head is between us and the end. if we wrapped, we'd go past it
-                return -1;
-            }
-            else
-            {
-                message_size_ptr = message_buffer->buffer;
-            }
-
-            message_ptr = (message_size_ptr + sizeof(uint32_t));
-        }
-        else
-        {
-            message_ptr = (message_size_ptr + sizeof(uint32_t));
-
-            // is the message at the very end?
-            if(message_ptr == message_buffer->end)
-            {
-                message_ptr = message_buffer->buffer;
-            }
-            else
-            {
-                // we're done
-            }
-        }
-
-        // will we go at or past the head?
-        if((message_ptr + sizeof(uint8_t)) >= head)
-        {
-            return -1;
-        }
+        return -1;
     }
 
     *(uint32_t *)message_size_ptr = message_size;
@@ -134,18 +201,34 @@ int add(MessageBuffer *message_buffer, uint8_t *message, const uint32_t message_
     }
     message_buffer->tail = tail;
 
-    if(sem_post_(&message_buffer->semaphore) == -1)
+    if(sem_post(&message_buffer->read_write_semaphore) == -1)
     {
+        DEBUG_PRINT_INFO();
         return -1;
     }
 
     return message_size;
 }
 
-int get(MessageBuffer *message_buffer, uint8_t *dest, uint32_t dest_size)
+int add(MessageBuffer *message_buffer, char *message, const uint32_t message_size)
 {
-    if(sem_wait_(&message_buffer->semaphore) == -1)
+    int result = add(message_buffer, (uint8_t *)message, message_size);
+    return result;
+}
+
+int get(MessageBuffer *message_buffer, uint8_t *dest, uint32_t dest_size, bool is_blocking = true)
+{
+    if(is_blocking)
     {
+        if(sem_wait(&message_buffer->read_write_semaphore) == -1)
+        {
+            DEBUG_PRINT_INFO();
+            return -1;
+        }
+    }
+    else if(is_empty(message_buffer))
+    {
+        DEBUG_PRINT_INFO();
         return -1;
     }
 
@@ -240,6 +323,12 @@ int get(MessageBuffer *message_buffer, uint8_t *dest, uint32_t dest_size)
     message_buffer->head = head;
 
     return message_size;
+}
+
+int get(MessageBuffer *message_buffer, char *dest, uint32_t dest_size, bool is_blocking = true)
+{
+    int result = get(message_buffer, (uint8_t *)dest, dest_size, is_blocking);
+    return result;
 }
 
 #endif

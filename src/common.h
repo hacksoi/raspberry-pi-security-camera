@@ -6,13 +6,17 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 /* preprocessor directives */
 //{
 
-#define ArrayCount(array) (sizeof(array)/sizeof(array[0]))
+#define ArrayCount(array) (int)(sizeof(array)/sizeof(array[0]))
 #define KILOBYTES(x) (x*1024)
 #define MEGABYTES(x) (x*1024*1024)
+
+#define DEBUG_PRINT_INFO() fprintf(stderr, "thread: %lu, %s line: %d\n", \
+                                   pthread_self(), __FILE__, __LINE__)
 //}
 
 /* misc functions */

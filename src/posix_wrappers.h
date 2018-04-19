@@ -1,3 +1,4 @@
+#if 0
 #ifndef POSIX_WRAPPERS_H
 #define POSIX_WRAPPERS_H
 
@@ -67,14 +68,25 @@
 MAKE_POSIX_WRAPPER1(int, sem_post, sem_t *, sem);
 MAKE_POSIX_WRAPPER1(int, sem_wait, sem_t *, sem);
 MAKE_POSIX_WRAPPER3(int, sem_init, sem_t *, sem, int, pshared, unsigned int, value);
-MAKE_POSIX_WRAPPER1(int, close, int, fd);
-MAKE_POSIX_WRAPPER2(int, listen, int, sockfd, int, backlog);
+
 MAKE_POSIX_WRAPPER3(int, socket, int, domain, int, type, int, protocol);
+MAKE_POSIX_WRAPPER1(int, close, int, fd);
+MAKE_POSIX_WRAPPER5(int, setsockopt, int, sockfd, int, level, int, optname, const void *, optval, socklen_t, optlen);
 MAKE_POSIX_WRAPPER3(int, bind, int, sockfd, const struct sockaddr *, addr, socklen_t, addrlen);
+MAKE_POSIX_WRAPPER2(int, listen, int, sockfd, int, backlog);
 MAKE_POSIX_WRAPPER3(int, accept, int, sockfd, struct sockaddr *, addr, socklen_t *, addrlen);
 MAKE_POSIX_WRAPPER4(ssize_t, recv, int, sockfd, void *, buf, size_t, len, int, flags);
 MAKE_POSIX_WRAPPER4(ssize_t, send, int, sockfd, void *, buf, size_t, len, int, flags);
-MAKE_POSIX_WRAPPER5(int, setsockopt, int, sockfd, int, level, int, optname, const void *, optval, socklen_t, optlen);
+
+void *malloc_(size_t size)
+{
+    void *result = malloc(size);
+    if(result == NULL)
+    {
+        perror();
+    }
+}
 //}
 
+#endif
 #endif
