@@ -342,8 +342,11 @@ void *background_websocket_client_thread_entry(void *thread_data)
 
                 // send pong
                 {
-                    // change opcode
-                    raw_frame[1] = OPCODE_PONG;
+                    // change opcode to pong
+                    {
+                        raw_frame[0] &= ~OPCODE_PING;
+                        raw_frame[0] |= OPCODE_PONG;
+                    }
 
                     int bytes_sent = send(socket_fd, raw_frame, bytes_received, 0);
                     if(bytes_sent != bytes_received)
