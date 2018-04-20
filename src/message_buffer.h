@@ -8,7 +8,7 @@
 #include <semaphore.h>
 #include <string.h>
 
-/* Thread-safe circular buffer */
+/* Thread-safe circular buffer. */
 struct MessageBuffer
 {
     // NOTE:
@@ -18,8 +18,6 @@ struct MessageBuffer
     //   the head or tail (when adding or removing a message) and just leave it at the end. 
 
     sem_t read_write_semaphore;
-    sem_t read_semaphore;
-    sem_t write_semaphore;
 
     uint32_t size;
     uint8_t *buffer;
@@ -75,55 +73,55 @@ bool get_message_insertion_pointers(MessageBuffer *message_buffer, const uint8_t
                                     uint8_t **_message_size_ptr, uint8_t **_message_ptr)
 {
     uint8_t *message_size_ptr = message_buffer->tail;
-    uint8_t *message_ptr;
-
-    // does the size wrap?
-    if((message_size_ptr + sizeof(uint32_t)) > message_buffer->end)
     {
-        if(message_size_ptr < head)
+        // does the size wrap?
+        if((message_size_ptr + sizeof(uint32_t)) > message_buffer->end)
         {
-            // the head is between us and the end. if we wrapped, we'd go past it
-            DEBUG_PRINT_INFO();
-            return false;
-        }
-        else
-        {
+            // would we go past the head?
+            if(message_size_ptr < head)
+            {
+                DEBUG_PRINT_INFO();
+                return false;
+            }
+
             message_size_ptr = message_buffer->buffer;
         }
-
-        message_ptr = (message_size_ptr + sizeof(uint32_t));
     }
-    else
-    {
-        message_ptr = (message_size_ptr + sizeof(uint32_t));
 
-        // is the message at the very end?
+    uint8_t *message_ptr = (message_size_ptr + sizeof(uint32_t));
+    {
+        if((message_size_ptr < head) && (message_ptr >= head))
+        {
+            DEBUG_PRINT_INFO();
+            return false;
+        } 
+
         if(message_ptr == message_buffer->end)
         {
             message_ptr = message_buffer->buffer;
-        }
-        else
-        {
-            // we're done
         }
     }
 
     // do we have room?
     {
         uint32_t bytes_left = 0;
-        if(message_ptr >= head)
         {
-            bytes_left += (message_buffer->end - message_ptr);
+            if(message_ptr > head)
+            {
+                // wrap around to beginning
+                bytes_left += (message_buffer->end - message_ptr);
+
+                bytes_left += (head - message_buffer->buffer - 1);
+            }
+            else
+            {
+                bytes_left += (head - message_ptr - 1); 
+            }
         }
-        bytes_left += ((head - message_buffer->buffer - 1) - sizeof(uint32_t));
 
         if(message_size > bytes_left)
         {
-#if 0
-            print(message_buffer);
-            printf("message size: %d\n", message_size);
             DEBUG_PRINT_INFO();
-#endif
             return false;
         }
     }
@@ -149,7 +147,6 @@ int add(MessageBuffer *message_buffer, uint8_t *message, const uint32_t message_
 {
     if(message_size == 0)
     {
-        DEBUG_PRINT_INFO();
         return 0;
     }
 
@@ -162,8 +159,9 @@ int add(MessageBuffer *message_buffer, uint8_t *message, const uint32_t message_
     const uint8_t *head = message_buffer->head;
 
     uint8_t *message_size_ptr, *message_ptr;
-    if(!get_message_insertion_pointers(message_buffer, message_buffer->tail, 
-                                       message_size, &message_size_ptr, &message_ptr))
+    if(!get_message_insertion_pointers(message_buffer, head, 
+                                       message_size,
+                                       &message_size_ptr, &message_ptr))
     {
         return -1;
     }
@@ -235,30 +233,24 @@ int get(MessageBuffer *message_buffer, uint8_t *dest, uint32_t dest_size, bool i
     const uint8_t *tail = message_buffer->tail;
 
     uint8_t *message_size_ptr = message_buffer->head;
-    uint8_t *message_ptr;
     {
         // does the size wrap?
         if((message_size_ptr + sizeof(uint32_t)) > message_buffer->end)
         {
             message_size_ptr = message_buffer->buffer;
-            message_ptr = (message_size_ptr + sizeof(uint32_t));
         }
-        else
+    }
+
+    uint8_t *message_ptr = (message_size_ptr + sizeof(uint32_t));
+    {
+        if(message_ptr == message_buffer->end)
         {
-            // is the message at the very end?
-            message_ptr = (message_size_ptr + sizeof(uint32_t));
-            if(message_ptr == message_buffer->end)
-            {
-                message_ptr = message_buffer->buffer;
-            }
-            else
-            {
-                // we're done
-            }
+            message_ptr = message_buffer->buffer;
         }
     }
 
     const uint32_t message_size = *(uint32_t *)message_size_ptr;
+    assert(message_size != 0);
 
     // copy payload
     uint8_t *head = message_ptr;
