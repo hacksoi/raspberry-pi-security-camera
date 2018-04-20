@@ -2,7 +2,6 @@
 #define MESSAGE_BUFFER_H
 
 #include "common.h"
-#include "posix_wrappers.h"
 
 #include <stdint.h>
 #include <semaphore.h>

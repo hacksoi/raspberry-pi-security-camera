@@ -10,19 +10,14 @@ Content-Type: text/html
 
         <script>
             var connection = new WebSocket("ws://192.168.1.141:3491");
-            connection.onopen = function(evt)
+            connection.onopen = function(event)
             {
                 console.log("performing test...");
                 connection.send("this is a test");
             };
             connection.onmessage = function (event)
             {
-                if(event.data != "this is a test - received!")
-                {
-                    consol.log("test failed");
-                    return;
-                }
-                console.log("test passed!");
+                console.log(event.data);
             };
         </script>
     </body>

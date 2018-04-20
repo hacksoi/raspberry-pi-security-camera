@@ -9,6 +9,8 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 
+#define TIMED_OUT -2
+
 // get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa)
 {
@@ -69,8 +71,30 @@ int create_socket(const char *port, int backlog = 10)
     return sock_fd;
 }
 
-int get_client(int sock_fd, const char *name = NULL)
+int get_client(int sock_fd, uint32_t timeout_millis = 0, const char *name = NULL)
 {
+    if(timeout_millis > 0)
+    {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(sock_fd, &rfds);
+
+        timeval tv = {};
+        tv.tv_usec = 1000*timeout_millis;
+
+        int select_result = select((sock_fd + 1), &rfds, NULL, NULL, &tv);
+        if(select_result == -1)
+        {
+            DEBUG_PRINT_INFO();
+            return -1;
+        }
+
+        if(select_result == 0)
+        {
+            return -2;
+        }
+    }
+
     sockaddr_storage their_addr;
     socklen_t sin_size = sizeof(their_addr);
     int client_fd = accept(sock_fd, (sockaddr *)&their_addr, &sin_size);

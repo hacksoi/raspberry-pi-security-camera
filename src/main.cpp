@@ -1,7 +1,7 @@
 #if 0
 TODO:
-    -ping pong
-    -alert client websocket thread about closure from background thread
+    -websockets.h
+        -alert client websocket thread about closure from background thread
 #endif
 
 #include "common.h"
@@ -26,6 +26,7 @@ TODO:
 #include <pthread.h>
 #include <fcntl.h>
 #include <semaphore.h>
+#include <time.h>
 
 /* preprocessor directives */
 //{
@@ -68,9 +69,10 @@ void *websocket_client_thread_entry(void *thread_data)
     printf("basic test passed\n");
 #endif
 
-#if 0
+#if 1
     while(1)
     {
+#if 0
         uint8_t message[256];
         int message_length = recv(socket, message);
         if(message_length == -1)
@@ -86,6 +88,16 @@ void *websocket_client_thread_entry(void *thread_data)
         {
             exit(1);
         }
+#endif
+
+        char *message = (char *)"funny cat photos";
+        if(!send(socket, (uint8_t *)message, (strlen(message) + 1)))
+        {
+            DEBUG_PRINT_INFO();
+            exit(1);
+        }
+
+        usleep(500000);
     }
 #endif
 
@@ -114,7 +126,7 @@ void *stream_thread_entry(void *data)
 
 int main(void)
 {
-    //pthread_create(&thread_pool[thread_pool_size++], NULL, stream_thread_entry, NULL);
+    pthread_create(&thread_pool[thread_pool_size++], NULL, stream_thread_entry, NULL);
 
     int sock_fd = create_socket(WEBSERVER_PORT);
     if(sock_fd == -1)
@@ -135,7 +147,7 @@ int main(void)
 
     while(1)
     {
-        int client_fd = get_client(sock_fd, "webserver");
+        int client_fd = get_client(sock_fd, 0, "webserver");
         if(client_fd == -1)
         {
             DEBUG_PRINT_INFO();
@@ -147,6 +159,10 @@ int main(void)
             DEBUG_PRINT_INFO();
             exit(1);
         }
+
+        // for some reason, closing it right after causes the browser to not receive our html. shutdown() fixes that.
+        shutdown(client_fd, SHUT_RDWR);
+        close(client_fd);
     }
 
 	return 0;

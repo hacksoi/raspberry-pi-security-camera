@@ -17,6 +17,8 @@
 #define WEBSOCKET_KEY_HEADER_LENGTH strlen(WEBSOCKET_KEY_HEADER)
 
 #define OPCODE_CONNECTION_CLOSE 0x08
+#define OPCODE_PING 0x09
+#define OPCODE_PONG 0x0A
 //}
 
 /* global variables */
@@ -26,6 +28,9 @@
 pthread_t thread_pool[20];
 int thread_pool_size;
 //}
+
+/* structs */
+//{
 
 struct WebSocket
 {
@@ -45,6 +50,15 @@ struct WebSocketFrame
     uint8_t *mask_key; // 4 consecutive bytes
     uint8_t *payload;
 };
+//}
+
+void print(WebSocketFrame frame)
+{
+    printf("fin: 0x%x, rsv1: 0x%x, rsv2: 0x%x, rsv3: 0x%x, opcode: 0x%x, mask: 0x%x, "
+           "payload_length: %llu, mask[0]: 0x%x, mask[1]: 0x%x, mask[2]: 0x%x, mask[3]: 0x%x\n", 
+           frame.fin, frame.rsv1, frame.rsv2, frame.rsv3, frame.opcode, frame.mask, 
+           frame.payload_length, frame.mask_key[0], frame.mask_key[1], frame.mask_key[2], frame.mask_key[3]);
+}
 
 WebSocketFrame inflate_frame(uint8_t *raw_frame)
 {
@@ -121,7 +135,7 @@ bool send(WebSocket *socket, uint8_t *message, uint32_t message_length)
     assert(message_length < sizeof(frame));
 
     // fill out frame
-    int frame_length;
+    int bytes_received;
     {
         // set fin bit
         frame[0] |= 0x80;
@@ -135,21 +149,21 @@ bool send(WebSocket *socket, uint8_t *message, uint32_t message_length)
         {
             frame[1] |= message_length;
             payload = &frame[2];
-            frame_length = 2;
+            bytes_received = 2;
         }
         else
         {
             put64be(&frame[2], message_length);
             payload = &frame[10];
-            frame_length = 10;
+            bytes_received = 10;
         }
 
         // copy payload
         memcpy(payload, message, message_length);
-        frame_length += message_length;
+        bytes_received += message_length;
     }
 
-    if(send(socket_fd, frame, frame_length, 0) == -1)
+    if(send(socket_fd, frame, bytes_received, 0) == -1)
     {
         DEBUG_PRINT_INFO();
         return false;
@@ -250,7 +264,7 @@ bool send_close(WebSocket *socket)
     int socket_fd = socket->fd;
 
     uint8_t frame[2] = {};
-    int frame_length;
+    int bytes_received;
     {
         // set fin bit
         frame[0] |= 0x80;
@@ -258,10 +272,10 @@ bool send_close(WebSocket *socket)
         // set opcode to close
         frame[0] |= 0x08;
 
-        frame_length = 2;
+        bytes_received = 2;
     }
 
-    if(send(socket_fd, frame, frame_length, 0) == -1)
+    if(send(socket_fd, frame, bytes_received, 0) == -1)
     {
         DEBUG_PRINT_INFO();
         return false;
@@ -297,14 +311,6 @@ bool close(WebSocket *socket)
     return true;
 }
 
-void print(WebSocketFrame frame)
-{
-    printf("fin: 0x%x, rsv1: 0x%x, rsv2: 0x%x, rsv3: 0x%x, opcode: 0x%x, mask: 0x%x, "
-           "payload_length: %llu, mask[0]: 0x%x, mask[1]: 0x%x, mask[2]: 0x%x, mask[3]: 0x%x\n", 
-           frame.fin, frame.rsv1, frame.rsv2, frame.rsv3, frame.opcode, frame.mask, 
-           frame.payload_length, frame.mask_key[0], frame.mask_key[1], frame.mask_key[2], frame.mask_key[3]);
-}
-
 void *background_websocket_client_thread_entry(void *thread_data)
 {
     WebSocket *socket = (WebSocket *)thread_data;
@@ -313,31 +319,55 @@ void *background_websocket_client_thread_entry(void *thread_data)
     while(1)
     {
         uint8_t raw_frame[1024];
-        int frame_length = recv(socket_fd, (char *)raw_frame, sizeof(raw_frame), 0);
-        if(frame_length < 0)
+        int bytes_received = recv(socket_fd, (char *)raw_frame, sizeof(raw_frame), 0);
+        if(bytes_received < 0)
         {
             DEBUG_PRINT_INFO();
             exit(1);
         }
 
-        const WebSocketFrame frame = inflate_frame(raw_frame);
-
-        if(frame.opcode == OPCODE_CONNECTION_CLOSE)
+        WebSocketFrame frame = inflate_frame(raw_frame);
+        switch(frame.opcode)
         {
-            printf("received a close\n");
-            send_close(socket);
-            return 0;
-        }
+            case OPCODE_CONNECTION_CLOSE:
+            {
+                printf("received a close\n");
+                send_close(socket);
+                return 0;
+            } break;
 
-        // decode
-        for(uint32_t i = 0; i < frame.payload_length; i++)
-        {
-            frame.payload[i] ^= frame.mask_key[i % 4];
-        }
+            case OPCODE_PING:
+            {
+                printf("received a ping\n");
 
-        if(add(&socket->message_buffer, frame.payload, frame.payload_length) != (int)frame.payload_length)
-        {
-            DEBUG_PRINT_INFO();
+                // send pong
+                {
+                    // change opcode
+                    raw_frame[1] = OPCODE_PONG;
+
+                    int bytes_sent = send(socket_fd, raw_frame, bytes_received, 0);
+                    if(bytes_sent != bytes_received)
+                    {
+                        DEBUG_PRINT_INFO();
+                        return 0;
+                    }
+                }
+            } break;
+
+            default:
+            {
+                // decode
+                for(uint32_t i = 0; i < frame.payload_length; i++)
+                {
+                    frame.payload[i] ^= frame.mask_key[i % 4];
+                }
+
+                int bytes_added = add(&socket->message_buffer, frame.payload, frame.payload_length);
+                if(bytes_added != (int)frame.payload_length)
+                {
+                    DEBUG_PRINT_INFO();
+                }
+            } break;
         }
     }
 
