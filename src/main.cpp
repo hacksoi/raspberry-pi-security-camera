@@ -4,10 +4,10 @@ TODO:
         -alert client websocket thread about closure from background thread
 #endif
 
-#include "common.h"
-#include "message_buffer.h"
-#include "socket_wrapper.h"
-#include "websockets.h"
+#include "ns_common.h"
+#include "ns_message_buffer.h"
+#include "ns_socket_wrapper.h"
+#include "ns_websockets.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -28,12 +28,10 @@ TODO:
 #include <semaphore.h>
 #include <time.h>
 
-/* preprocessor directives */
-//{
 
 #define WEBSERVER_PORT "3490"
 #define VIDEO_STREAM_PORT "3491"
-//}
+
 
 void *websocket_client_thread_entry(void *thread_data)
 {
