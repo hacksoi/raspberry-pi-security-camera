@@ -5,9 +5,10 @@ TODO:
 #endif
 
 #include "ns_common.h"
-#include "ns_message_buffer.h"
+#include "ns_message_queue.h"
 #include "ns_socket_wrapper.h"
 #include "ns_websockets.h"
+#include "ns_files.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -33,33 +34,36 @@ TODO:
 #define VIDEO_STREAM_PORT "3491"
 
 
+// TODO: sync this
+pthread_t thread_pool[20];
+int thread_pool_size;
+
+
 void *websocket_client_thread_entry(void *thread_data)
 {
-    WebSocket *socket = (WebSocket *)thread_data;
+    NsWebSocket *websocket = (NsWebSocket *)thread_data;
 
 #if 1
     // perform basic test
     {
-        uint8_t test_message[256];
-        int message_length = recv(socket, test_message, sizeof(test_message));
-        if(message_length == -1)
+        char test_message[256];
+        int message_length = ns_websocket_receive(websocket, test_message, sizeof(test_message));
+        if(message_length == NS_ERROR)
         {
-            DEBUG_PRINT_INFO();
             exit(1);
         }
 
         printf("test message: %s\n", test_message);
 
-        if(strcmp((char *)test_message, "this is a test"))
+        if(strcmp(test_message, "this is a test"))
         {
-            DEBUG_PRINT_INFO();
+            DebugPrintInfo();
             exit(1);
         }
 
-        strcat((char *)test_message, " - received!");
-        if(!send(socket, test_message, strlen((char *)test_message)))
+        strcat(test_message, " - received!");
+        if(ns_websocket_send(websocket, test_message, strlen(test_message)) == NS_ERROR)
         {
-            DEBUG_PRINT_INFO();
             exit(1);
         }
     }
@@ -89,9 +93,8 @@ void *websocket_client_thread_entry(void *thread_data)
 #endif
 
         char *message = (char *)"funny cat photos";
-        if(!send(socket, (uint8_t *)message, (strlen(message) + 1)))
+        if(ns_websocket_send(websocket, message, (strlen(message) + 1)) == NS_ERROR)
         {
-            DEBUG_PRINT_INFO();
             exit(1);
         }
 
@@ -104,18 +107,18 @@ void *websocket_client_thread_entry(void *thread_data)
 
 void *stream_thread_entry(void *data)
 {
-    WebSocket socket;
-    if(!create(&socket, VIDEO_STREAM_PORT))
+    NsWebSocket websocket;
+    if(ns_websocket_create(&websocket, VIDEO_STREAM_PORT) == NS_ERROR)
     {
-        DEBUG_PRINT_INFO();
+        DebugPrintInfo();
         exit(1);
     }
 
-    WebSocket clients[10];
+    NsWebSocket clients[10];
     int num_clients = 0;
     while(1)
     {
-        get_client(&socket, &clients[num_clients]);
+        ns_websocket_get_client(&websocket, &clients[num_clients]);
         pthread_create(&thread_pool[thread_pool_size++], NULL, websocket_client_thread_entry, &clients[num_clients++]);
     }
 
@@ -124,43 +127,52 @@ void *stream_thread_entry(void *data)
 
 int main(void)
 {
+    ns_sockets_init();
+
     pthread_create(&thread_pool[thread_pool_size++], NULL, stream_thread_entry, NULL);
 
-    int sock_fd = create_socket(WEBSERVER_PORT);
-    if(sock_fd == -1)
+    NsSocket socket;
+    if(ns_socket_create(&socket, WEBSERVER_PORT) == NS_ERROR)
     {
-        DEBUG_PRINT_INFO();
         exit(1);
     }
 
-    char *webpage;
+    char webpage[Kilobytes(4)];
     int webpage_size;
-    if(!load_file("webpage.html", &webpage, &webpage_size))
     {
-        DEBUG_PRINT_INFO();
-        exit(1);
+        NsFile file;
+        ns_file_open(&file, (char *)"webpage.html");
+
+        webpage_size = ns_file_load(&file, webpage, sizeof(webpage));
+        if(webpage_size == NS_ERROR)
+        {
+            exit(1);
+        }
+
+        if(ns_file_close(&file) == NS_ERROR)
+        {
+            exit(1);
+        }
     }
 
 	printf("server: waiting for connections...\n");
 
     while(1)
     {
-        int client_fd = get_client(sock_fd, 0, "webserver");
-        if(client_fd == -1)
+        NsSocket client_socket;
+        if(ns_socket_get_client(&socket, &client_socket) == NS_ERROR)
         {
-            DEBUG_PRINT_INFO();
             exit(1);
         }
 
-        if(send(client_fd, webpage, webpage_size, 0) == -1) 
+        if(ns_socket_send(&client_socket, webpage, webpage_size) == NS_ERROR) 
         {
-            DEBUG_PRINT_INFO();
             exit(1);
         }
 
         // for some reason, closing it right after causes the browser to not receive our html. shutdown() fixes that.
-        shutdown(client_fd, SHUT_RDWR);
-        close(client_fd);
+        ns_socket_shutdown(&client_socket, NS_SOCKET_RDWR);
+        ns_socket_close(&client_socket);
     }
 
 	return 0;
