@@ -43,12 +43,14 @@ int main()
                     // set up for next state
                     size = 0;
                     cur_state = READING_IMAGE;
+
+                    buf[size++] = 0xff;
+                    buf[size++] = 0xd8;
                 }
             } break;
 
             case READING_IMAGE:
             {
-
                 if(size < sizeof(buf))
                 {
                     buf[size++] = c;
