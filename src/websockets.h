@@ -1,3 +1,8 @@
+#if 0
+// TODO:
+    -instead of making a thread per client (over 1000 threads?) keep a table of clients and iterate over them.
+#endif
+
 #ifndef WEBSOCKETS_H
 #define WEBSOCKETS_H
 
