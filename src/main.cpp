@@ -1,12 +1,3 @@
-#if 0
-    -currently, we have a problem with resources:
-        -1) ns_websockets.h: a thread struct is needed for every client
-        -2) ns_http_server.h: a thread struct _and_ socket struct is needed for every client
-    -we can solve the thread problem by just creating the max number of threads from the outset, and passing work to them. they never terminate.
-        -nice because threads don't really need to terminate, so we don't recreate them which is costly
-    -we can solve the socket problem by creating a socket pool, and the user just needs to make sure he releases the socket back to the pool.
-#endif
-
 #include "ns_common.h"
 #include "ns_message_queue.h"
 #include "ns_socket.h"
