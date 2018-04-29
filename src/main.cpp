@@ -1,48 +1,269 @@
 #include "ns_common.h"
 #include "ns_message_queue.h"
 #include "ns_socket.h"
+#include "ns_socket_pool.h"
 #include "ns_websocket.h"
 #include "ns_file.h"
 #include "ns_http_server.h"
 
-#include <assert.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <errno.h>
-#include <string.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <netinet/in.h>
-#include <netdb.h>
-#include <arpa/inet.h>
-#include <signal.h>
-#include <pthread.h>
-#include <fcntl.h>
-#include <semaphore.h>
-#include <time.h>
 
+#define NUM_WORKER_THREADS 3
+#define MAX_CONNECTIONS 64
 
 #define WEBSERVER_PORT "3490"
 #define VIDEO_STREAM_PORT "3491"
 
 
-NsThreadPool thread_pool;
+struct VsWebSocket
+{
+    NsWebSocket websocket;
+    VsWebSocket *next;
+    VsWebSocket *prev;
+};
 
+struct VsWebSocketList
+{
+    VsWebSocket *head;
+    NsCondv condv;
+    NsMutex mutex;
+    int size;
+};
+
+
+global NsWorkerThreads worker_threads;
+global VsWebSocketList vs_websocket_lists[NUM_WORKER_THREADS];
+global VsWebSocket vs_websockets[MAX_CONNECTIONS];
+global VsWebSocket *vs_websocket_free_list_head;
+
+
+int
+init_list(VsWebSocketList *list)
+{
+    int status;
+
+    status = ns_condv_create(&list->condv);
+    if(status != NS_SUCCESS)
+    {
+        DebugPrintInfo();
+        return status;
+    }
+
+    status = ns_mutex_create(&list->mutex);;
+    if(status != NS_SUCCESS)
+    {
+        DebugPrintInfo();
+        return status;
+    }
+
+    return NS_SUCCESS;
+}
+
+VsWebSocket *
+get_websocket()
+{
+    VsWebSocket *free = vs_websocket_free_list_head;
+    if(free == NULL)
+    {
+        DebugPrintInfo();
+        return NULL;
+    }
+
+    vs_websocket_free_list_head = free->next;
+
+    return free;
+}
+
+int
+add_websocket(VsWebSocketList *list, VsWebSocket *websocket)
+{
+    int status;
+
+    status = ns_mutex_lock(&list->mutex);
+    if(status != NS_SUCCESS)
+    {
+        DebugPrintInfo();
+        return status;
+    }
+
+    VsWebSocket *head = list->head;
+
+    // empty?
+    if(head == NULL)
+    {
+        list->head = websocket;
+    }
+    else
+    {
+        head->prev = websocket;
+        websocket->next = head;
+        websocket->prev = NULL;
+        list->head = websocket;
+    }
+
+    list->size++;
+
+    status = ns_condv_signal(&list->condv);
+    if(status != NS_SUCCESS)
+    {
+        DebugPrintInfo();
+        return status;
+    }
+
+    status = ns_mutex_unlock(&list->mutex);
+    if(status != NS_SUCCESS)
+    {
+        DebugPrintInfo();
+        return status;
+    }
+
+    return NS_SUCCESS;
+}
+
+int
+remove_websocket(VsWebSocketList *list, VsWebSocket *websocket)
+{
+    int status;
+
+    status = ns_mutex_lock(&list->mutex);
+    if(status != NS_SUCCESS)
+    {
+        DebugPrintInfo();
+        return status;
+    }
+
+    VsWebSocket *head = list->head;
+
+    if(head == NULL)
+    {
+        DebugPrintInfo();
+        return false;
+    }
+
+    VsWebSocket *prev = websocket->prev;
+    VsWebSocket *next = websocket->next;
+
+    // head?
+    if(head == websocket)
+    {
+        // single element?
+        if(head->next == NULL)
+        {
+            list->head = NULL;
+        }
+        else
+        {
+            next->prev = NULL;
+            list->head = next;
+        }
+    }
+    // tail?
+    else if(websocket->next == NULL)
+    {
+        prev->next = NULL;
+    }
+    else
+    {
+        prev->next = next;
+        next->prev = prev;
+    }
+
+    list->size--;
+
+    // add to free list
+    websocket->next = vs_websocket_free_list_head;
+    vs_websocket_free_list_head = websocket;
+
+    status = ns_mutex_unlock(&list->mutex);
+    if(status != NS_SUCCESS)
+    {
+        DebugPrintInfo();
+        return status;
+    }
+
+    return NS_SUCCESS;
+}
 
 void *
-video_stream_client_thread_entry(void *thread_data)
+video_stream_client_sender_thread_entry(void *thread_data)
 {
-    NsWebSocket *websocket = (NsWebSocket *)thread_data;
+    VsWebSocketList *list = (VsWebSocketList *)thread_data;
 
-#if 1
+    while(1)
     {
+        ns_mutex_lock(&list->mutex);
+
+        // wait for list to be non empty
+        while(list->size == 0)
+        {
+            ns_condv_wait(&list->condv, &list->mutex);
+        }
+
+        VsWebSocket *cur_vs_websocket = list->head;
+        while(cur_vs_websocket != NULL)
+        {
+            NsWebSocket *websocket = &cur_vs_websocket->websocket;
+
+            char *message = (char *)"funny cat photos";
+            int bytes_sent = ns_websocket_send(websocket, message, (strlen(message) + 1));
+            if(bytes_sent == NS_WEBSOCKET_CLIENT_CLOSED)
+            {
+                printf("closing client...\n");
+                remove_websocket(list, cur_vs_websocket);
+            }
+            else if(bytes_sent <= 0)
+            {
+                DebugPrintInfo();
+                return (void *)bytes_sent;
+            }
+
+            cur_vs_websocket = cur_vs_websocket->next;
+        }
+
+        ns_mutex_unlock(&list->mutex);
+
+        usleep(500000);
+    }
+
+    return NS_SUCCESS;
+}
+
+void *
+video_stream_client_getter_thread_entry(void *data)
+{
+    int status;
+    NsWebSocket websocket;
+
+    status = ns_websocket_listen(&websocket, VIDEO_STREAM_PORT);
+    if(status != NS_SUCCESS)
+    {
+        DebugPrintInfo();
+        return (void *)status;
+    }
+
+    while(1)
+    {
+        VsWebSocket *client_vs_websocket = get_websocket();
+        if(client_vs_websocket == NULL)
+        {
+            DebugPrintInfo();
+            return (void *)status;
+        }
+
+        NsWebSocket *client_websocket = &client_vs_websocket->websocket;
+
+        status = ns_websocket_get_client(&websocket, client_websocket);
+        if(status != NS_SUCCESS)
+        {
+            DebugPrintInfo();
+            return (void *)status;
+        }
+
+        // do basic test
+
         printf("performing basic test...\n");
 
         char test_message[256];
-        int message_length = ns_websocket_receive(websocket, test_message, sizeof(test_message));
+        int message_length = ns_websocket_receive(client_websocket, test_message, sizeof(test_message));
         if(message_length <= 0)
         {
             DebugPrintInfo();
@@ -58,7 +279,7 @@ video_stream_client_thread_entry(void *thread_data)
         }
 
         strcat(test_message, " - received!");
-        int bytes_sent = ns_websocket_send(websocket, test_message, strlen(test_message));
+        int bytes_sent = ns_websocket_send(client_websocket, test_message, strlen(test_message));
         if(bytes_sent <= 0)
         {
             DebugPrintInfo();
@@ -66,71 +287,27 @@ video_stream_client_thread_entry(void *thread_data)
         }
 
         printf("basic test passed\n");
-    }
-#endif
 
-    while(1)
-    {
-        char *message = (char *)"funny cat photos";
-        int bytes_sent = ns_websocket_send(websocket, message, (strlen(message) + 1));
-        if(bytes_sent == NS_WEBSOCKET_CLIENT_CLOSED)
+        // add client to list
+
+        int smallest_idx = 0;
+        for(int i = 0; i < NUM_WORKER_THREADS; i++)
         {
-            printf("closing thread...\n");
-            return (void *)NS_SUCCESS;
-        }
-        else if(bytes_sent <= 0)
-        {
-            DebugPrintInfo();
-            return (void *)bytes_sent;
+            if(vs_websocket_lists[i].size < vs_websocket_lists[smallest_idx].size)
+            {
+                smallest_idx = i;
+            }
         }
 
-        usleep(500000);
-    }
-
-    return 0;
-}
-
-void *
-video_stream_client_getter_thread_entry(void *data)
-{
-    int status;
-    NsWebSocket websocket;
-
-    if(ns_websocket_create(&websocket, VIDEO_STREAM_PORT) != NS_SUCCESS)
-    {
-        DebugPrintInfo();
-        exit(1);
-    }
-
-    NsWebSocket clients[10];
-    int num_clients = 0;
-    while(1)
-    {
-        status = ns_websocket_get_client(&websocket, &clients[num_clients]);
+        status = add_websocket(&vs_websocket_lists[smallest_idx], client_vs_websocket);
         if(status != NS_SUCCESS)
         {
             DebugPrintInfo();
-            exit(1);
-        }
-
-        NsThread *client_thread;
-        status = ns_thread_pool_get(&thread_pool, &client_thread);
-        if(status != NS_SUCCESS)
-        {
-            DebugPrintInfo();
-            exit(1);
-        }
-
-        status = ns_thread_pool_create_thread(&thread_pool, video_stream_client_thread_entry, 
-                                              &clients[num_clients++]);
-        if(status != NS_SUCCESS)
-        {
-            DebugPrintInfo();
-            exit(1);
+            return (void *)status;
         }
     }
 
-    return 0;
+    return NS_SUCCESS;
 }
 
 int 
@@ -138,39 +315,69 @@ main(void)
 {
     int status;
 
-    status = ns_websockets_init();
+    status = ns_sockets_startup();
     if(status != NS_SUCCESS)
     {
         DebugPrintInfo();
-        exit(1);
+        return status;
     }
 
-    status = ns_thread_pool_create(&thread_pool, 256);
+#define MAX_CONNECTIONS 64
+
+#if 0
+    status = ns_websockets_startup(MAX_CONNECTIONS, 4);
     if(status != NS_SUCCESS)
     {
         DebugPrintInfo();
-        exit(1);
+        return NS_ERROR;
     }
+#endif
 
-    status = ns_thread_pool_create_thread(&thread_pool, video_stream_client_getter_thread_entry, NULL);
+    status = ns_http_server_startup(MAX_CONNECTIONS, "8000", 4);
     if(status != NS_SUCCESS)
     {
         DebugPrintInfo();
-        exit(1);
+        return status;
     }
 
-    NsHttpServer http_server;
-    ns_http_server_create(&http_server);
-
-    for(;;)
+#if 0
+    status = ns_worker_threads_create(&worker_threads, NUM_WORKER_THREADS, MAX_CONNECTIONS);
+    if(status != NS_SUCCESS)
     {
-        if(pause() == -1)
+        DebugPrintInfo();
+        return NS_ERROR;
+    }
+
+    // initialize free list
+    vs_websocket_free_list_head = vs_websockets;
+    for(int i = 0; i < (int)(ArrayCount(vs_websockets) - 1); i++)
+    {
+        vs_websockets[i].next = &vs_websockets[i + 1];
+    }
+
+    for(int i = 0; i < NUM_WORKER_THREADS; i++)
+    {
+        VsWebSocketList *list = &vs_websocket_lists[i];
+        init_list(list);
+        status = ns_worker_threads_add_work(&worker_threads, 
+                                            video_stream_client_sender_thread_entry, 
+                                            (void *)list);
+        if(status != NS_SUCCESS)
         {
-            exit(1);
+            DebugPrintInfo();
+            return status;
         }
     }
 
-	return 0;
+    video_stream_client_getter_thread_entry(NULL);
+#endif
+
+    for(;;)
+    {
+        pause();
+    }
+
+	return NS_SUCCESS;
 }
 
 
