@@ -90,6 +90,8 @@ add_websocket(VsWebSocketList *list, VsWebSocket *websocket)
     // empty?
     if(head == NULL)
     {
+        websocket->next = NULL;
+        websocket->prev = NULL;
         list->head = websocket;
     }
     else
@@ -119,17 +121,11 @@ add_websocket(VsWebSocketList *list, VsWebSocket *websocket)
     return NS_SUCCESS;
 }
 
+/* This MUST only be called from within the client handler thread. */
 int
 remove_websocket(VsWebSocketList *list, VsWebSocket *websocket)
 {
     int status;
-
-    status = ns_mutex_lock(&list->mutex);
-    if(status != NS_SUCCESS)
-    {
-        DebugPrintInfo();
-        return status;
-    }
 
     VsWebSocket *head = list->head;
 
@@ -173,19 +169,13 @@ remove_websocket(VsWebSocketList *list, VsWebSocket *websocket)
     websocket->next = vs_websocket_free_list_head;
     vs_websocket_free_list_head = websocket;
 
-    status = ns_mutex_unlock(&list->mutex);
-    if(status != NS_SUCCESS)
-    {
-        DebugPrintInfo();
-        return status;
-    }
-
     return NS_SUCCESS;
 }
 
 void *
 video_stream_peer_sender_thread_entry(void *thread_data)
 {
+    int status;
     VsWebSocketList *list = (VsWebSocketList *)thread_data;
 
     while(1)
@@ -198,26 +188,53 @@ video_stream_peer_sender_thread_entry(void *thread_data)
             ns_condv_wait(&list->condv, &list->mutex);
         }
 
+        VsWebSocket vs_dummy_websocket;
         VsWebSocket *cur_vs_websocket = list->head;
+        printf("thread: %lu\n", GetThread());
         while(cur_vs_websocket != NULL)
         {
             NsWebSocket *websocket = &cur_vs_websocket->websocket;
+            printf("hello; %d\n", websocket->socket.internal_socket);
 
             char *message = (char *)"funny cat photos";
-            int bytes_sent = ns_websocket_send(websocket, message, (strlen(message) + 1));
-            if(bytes_sent == NS_WEBSOCKET_PEER_CLOSED)
+            int message_length = strlen(message) + 1;
+            int bytes_sent = ns_websocket_send(websocket, message, message_length);
+            if(bytes_sent != message_length)
             {
-                printf("closing peer...\n");
-                remove_websocket(list, cur_vs_websocket);
-            }
-            else if(bytes_sent <= 0)
-            {
-                DebugPrintInfo();
-                return (void *)bytes_sent;
+                if(bytes_sent == 0)
+                {
+                    printf("main: closing websocket...\n");
+
+                    status = ns_websocket_close(websocket);
+                    if(status != NS_SUCCESS)
+                    {
+                        DebugPrintInfo();
+                        return (void *)status;
+                    }
+
+                    vs_dummy_websocket.next = cur_vs_websocket->next;
+
+                    status = remove_websocket(list, cur_vs_websocket);
+                    if(status != NS_SUCCESS)
+                    {
+                        DebugPrintInfo();
+                        return (void *)status;
+                    }
+
+                    cur_vs_websocket = &vs_dummy_websocket;
+
+                    printf("main: websocket closed\n");
+                }
+                else
+                {
+                    DebugPrintInfo();
+                    return (void *)bytes_sent;
+                }
             }
 
             cur_vs_websocket = cur_vs_websocket->next;
         }
+        printf("\n");
 
         ns_mutex_unlock(&list->mutex);
 
@@ -257,9 +274,9 @@ video_stream_peer_getter_thread_entry(void *data)
             return (void *)status;
         }
 
-        // do basic test
+        printf("main: received a peer\n");
 
-        printf("performing basic test...\n");
+        // do basic test
 
         char test_message[256];
         int message_length = ns_websocket_receive(peer_websocket, test_message, sizeof(test_message));
@@ -268,8 +285,7 @@ video_stream_peer_getter_thread_entry(void *data)
             DebugPrintInfo();
             return (void *)NS_ERROR;
         }
-
-        printf("test message: %s\n", test_message);
+        test_message[message_length] = '\0';
 
         if(strcmp(test_message, "this is a test"))
         {
@@ -306,6 +322,7 @@ video_stream_peer_getter_thread_entry(void *data)
         }
     }
 
+    DebugPrintInfo();
     return NS_SUCCESS;
 }
 
@@ -341,7 +358,7 @@ main()
     if(status != NS_SUCCESS)
     {
         DebugPrintInfo();
-        return NS_ERROR;
+        return status;
     }
 
     // initialize free list
@@ -354,7 +371,14 @@ main()
     for(int i = 0; i < NUM_WORKER_THREADS; i++)
     {
         VsWebSocketList *list = &vs_websocket_lists[i];
-        init_list(list);
+
+        status = init_list(list);
+        if(status != NS_SUCCESS)
+        {
+            DebugPrintInfo();
+            return status;
+        }
+
         status = ns_worker_threads_add_work(&worker_threads, 
                                             video_stream_peer_sender_thread_entry, 
                                             (void *)list);
