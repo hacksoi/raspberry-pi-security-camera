@@ -10,7 +10,7 @@
 #define NUM_WORKER_THREADS 3
 #define MAX_CONNECTIONS 64
 
-#define WEBSERVER_PORT "3490"
+#define HTTP_SERVER_PORT "8000"
 #define VIDEO_STREAM_PORT "3491"
 
 
@@ -184,7 +184,7 @@ remove_websocket(VsWebSocketList *list, VsWebSocket *websocket)
 }
 
 void *
-video_stream_client_sender_thread_entry(void *thread_data)
+video_stream_peer_sender_thread_entry(void *thread_data)
 {
     VsWebSocketList *list = (VsWebSocketList *)thread_data;
 
@@ -205,9 +205,9 @@ video_stream_client_sender_thread_entry(void *thread_data)
 
             char *message = (char *)"funny cat photos";
             int bytes_sent = ns_websocket_send(websocket, message, (strlen(message) + 1));
-            if(bytes_sent == NS_WEBSOCKET_CLIENT_CLOSED)
+            if(bytes_sent == NS_WEBSOCKET_PEER_CLOSED)
             {
-                printf("closing client...\n");
+                printf("closing peer...\n");
                 remove_websocket(list, cur_vs_websocket);
             }
             else if(bytes_sent <= 0)
@@ -228,11 +228,11 @@ video_stream_client_sender_thread_entry(void *thread_data)
 }
 
 void *
-video_stream_client_getter_thread_entry(void *data)
+video_stream_peer_getter_thread_entry(void *data)
 {
     int status;
-    NsWebSocket websocket;
 
+    NsWebSocket websocket;
     status = ns_websocket_listen(&websocket, VIDEO_STREAM_PORT);
     if(status != NS_SUCCESS)
     {
@@ -242,16 +242,15 @@ video_stream_client_getter_thread_entry(void *data)
 
     while(1)
     {
-        VsWebSocket *client_vs_websocket = get_websocket();
-        if(client_vs_websocket == NULL)
+        VsWebSocket *peer_vs_websocket = get_websocket();
+        if(peer_vs_websocket == NULL)
         {
             DebugPrintInfo();
             return (void *)status;
         }
 
-        NsWebSocket *client_websocket = &client_vs_websocket->websocket;
-
-        status = ns_websocket_get_client(&websocket, client_websocket);
+        NsWebSocket *peer_websocket = &peer_vs_websocket->websocket;
+        status = ns_websocket_get_peer(&websocket, peer_websocket);
         if(status != NS_SUCCESS)
         {
             DebugPrintInfo();
@@ -263,7 +262,7 @@ video_stream_client_getter_thread_entry(void *data)
         printf("performing basic test...\n");
 
         char test_message[256];
-        int message_length = ns_websocket_receive(client_websocket, test_message, sizeof(test_message));
+        int message_length = ns_websocket_receive(peer_websocket, test_message, sizeof(test_message));
         if(message_length <= 0)
         {
             DebugPrintInfo();
@@ -279,7 +278,7 @@ video_stream_client_getter_thread_entry(void *data)
         }
 
         strcat(test_message, " - received!");
-        int bytes_sent = ns_websocket_send(client_websocket, test_message, strlen(test_message));
+        int bytes_sent = ns_websocket_send(peer_websocket, test_message, strlen(test_message));
         if(bytes_sent <= 0)
         {
             DebugPrintInfo();
@@ -288,7 +287,7 @@ video_stream_client_getter_thread_entry(void *data)
 
         printf("basic test passed\n");
 
-        // add client to list
+        // add peer to list
 
         int smallest_idx = 0;
         for(int i = 0; i < NUM_WORKER_THREADS; i++)
@@ -299,7 +298,7 @@ video_stream_client_getter_thread_entry(void *data)
             }
         }
 
-        status = add_websocket(&vs_websocket_lists[smallest_idx], client_vs_websocket);
+        status = add_websocket(&vs_websocket_lists[smallest_idx], peer_vs_websocket);
         if(status != NS_SUCCESS)
         {
             DebugPrintInfo();
@@ -311,7 +310,7 @@ video_stream_client_getter_thread_entry(void *data)
 }
 
 int 
-main(void)
+main()
 {
     int status;
 
@@ -324,23 +323,20 @@ main(void)
 
 #define MAX_CONNECTIONS 64
 
-#if 0
     status = ns_websockets_startup(MAX_CONNECTIONS, 4);
     if(status != NS_SUCCESS)
     {
         DebugPrintInfo();
         return NS_ERROR;
     }
-#endif
 
-    status = ns_http_server_startup(MAX_CONNECTIONS, "8000", 4);
+    status = ns_http_server_startup(MAX_CONNECTIONS, HTTP_SERVER_PORT, 4);
     if(status != NS_SUCCESS)
     {
         DebugPrintInfo();
         return status;
     }
 
-#if 0
     status = ns_worker_threads_create(&worker_threads, NUM_WORKER_THREADS, MAX_CONNECTIONS);
     if(status != NS_SUCCESS)
     {
@@ -360,7 +356,7 @@ main(void)
         VsWebSocketList *list = &vs_websocket_lists[i];
         init_list(list);
         status = ns_worker_threads_add_work(&worker_threads, 
-                                            video_stream_client_sender_thread_entry, 
+                                            video_stream_peer_sender_thread_entry, 
                                             (void *)list);
         if(status != NS_SUCCESS)
         {
@@ -369,13 +365,7 @@ main(void)
         }
     }
 
-    video_stream_client_getter_thread_entry(NULL);
-#endif
-
-    for(;;)
-    {
-        pause();
-    }
+    video_stream_peer_getter_thread_entry(NULL);
 
 	return NS_SUCCESS;
 }
