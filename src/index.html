@@ -9,15 +9,24 @@
         <p>My first paragraph.</p>
 
         <script>
-            var connection = new WebSocket("ws://192.168.1.141:3491");
+            var connection = new WebSocket("ws://192.168.1.141:8001");
+
             connection.onopen = function(event)
             {
                 console.log("performing test...");
                 connection.send("this is a test");
             };
+
             connection.onmessage = function(event)
             {
-                console.log(event.data);
+                var file_reader = new FileReader();
+                file_reader.onload = function()
+                {
+                    var array_buffer = this.result;
+                    var view = new Uint8Array(array_buffer);
+                    console.log(view);
+                };
+                file_reader.readAsArrayBuffer(event.data);
             };
         </script>
     </body>

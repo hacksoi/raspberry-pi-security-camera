@@ -196,8 +196,16 @@ video_stream_peer_sender_thread_entry(void *thread_data)
             NsWebSocket *websocket = &cur_vs_websocket->websocket;
             printf("hello; %d\n", websocket->socket.internal_socket);
 
+            // fill out message
+            char message[];
+            int message_length;
+            {
+            }
+
+#if 0
             char *message = (char *)"funny cat photos";
             int message_length = strlen(message) + 1;
+#endif
             int bytes_sent = ns_websocket_send(websocket, message, message_length);
             if(bytes_sent != message_length)
             {
