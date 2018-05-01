@@ -2,29 +2,96 @@
 <html>
     <head>
         <title>Raspi Security Camera</title>
+        <script src="jpg.js"></script>
     </head>
 
     <body>
         <h1>My First Heading</h1>
         <p>My first paragraph.</p>
 
-        <script>
-            var connection = new WebSocket("ws://192.168.1.141:8001");
+        <table>
+            <tr>
+                <td><canvas id="c1"></canvas></td>
+            </tr>
+        </table>
 
+        <script>
+/*
+            // Simple loading of the JPEG images
+            function displayImage(canvasId, url) {
+                var j = new JpegImage();
+                j.onload = function() {
+                    var c = document.getElementById(canvasId);
+                    c.width = j.width;
+                    c.height = j.height;
+                    var ctx = c.getContext("2d");
+                    var d = ctx.getImageData(0,0,j.width,j.height);
+                    j.copyToImageData(d);
+                    ctx.putImageData(d, 0, 0);
+                };
+                j.load(url);
+            }
+            
+            // Loading image as binary data and using data protocole and base64 encoding
+            function loadAsUint8Array(url, callback) {
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', url);
+                xhr.responseType = 'arraybuffer';
+                xhr.onload = function () {
+                    callback(new Uint8Array(xhr.response));
+                };
+                xhr.send();
+            }
+            function loadAsDataURL(url, callback) {
+                loadAsUint8Array(url, function (arr) {
+                    var s = '';
+                    for (var i = 0; i < arr.length; i++) {
+                        s += String.fromCharCode(arr[i]);
+                    }
+                    callback('data:image/jpeg;base64,' + btoa(s));
+                });
+            }
+            loadAsDataURL("test_image.jpg", function (url) {
+                console.log("holy shit...");
+                displayImage("c1", url);
+            });
+*/
+            // Simple loading of the JPEG images
+            function display_image(canvasId, arr) {
+                var s = '';
+                for (var i = 0; i < arr.length; i++) {
+                    s += String.fromCharCode(arr[i]);
+                }
+                var url = 'data:image/jpeg;base64,' + btoa(s);
+
+                var j = new JpegImage();
+                j.onload = function() {
+                    var c = document.getElementById(canvasId);
+                    c.width = j.width;
+                    c.height = j.height;
+                    var ctx = c.getContext("2d");
+                    var d = ctx.getImageData(0,0,j.width,j.height);
+                    j.copyToImageData(d);
+                    ctx.putImageData(d, 0, 0);
+                };
+                j.load(url);
+            }
+
+            var connection = new WebSocket("ws://192.168.1.141:8001");
             connection.onopen = function(event)
             {
                 console.log("performing test...");
                 connection.send("this is a test");
             };
-
             connection.onmessage = function(event)
             {
                 var file_reader = new FileReader();
                 file_reader.onload = function()
                 {
                     var array_buffer = this.result;
-                    var view = new Uint8Array(array_buffer);
-                    console.log(view);
+                    var uint8_array = new Uint8Array(array_buffer);
+                    display_image("c1", uint8_array);
+                    //console.log(view);
                 };
                 file_reader.readAsArrayBuffer(event.data);
             };
