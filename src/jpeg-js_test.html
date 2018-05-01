@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="jpg.js"></script>
+</head>
+<body>
+  <table>
+    <tr>
+      <td><canvas id="c1"></canvas></td>
+    </tr>
+  </table>
+
+  <script>
+    // Simple loading of the JPEG images
+    function displayImage(canvasId, url) {
+      var j = new JpegImage();
+      j.onload = function() {
+        var c = document.getElementById(canvasId);
+        c.width = j.width;
+        c.height = j.height;
+        var ctx = c.getContext("2d");
+        var d = ctx.getImageData(0,0,j.width,j.height);
+        j.copyToImageData(d);
+        ctx.putImageData(d, 0, 0);
+      };
+      j.load(url);
+    }
+    //displayImage("c1", "test.jpg");
+
+    // Loading image as binary data and using data protocole and base64 encoding
+    function loadAsUint8Array(url, callback) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url);
+      xhr.responseType = 'arraybuffer';
+      xhr.onload = function () {
+        callback(new Uint8Array(xhr.response));
+      };
+      xhr.send();
+    }
+    function loadAsDataURL(url, callback) {
+      loadAsUint8Array(url, function (arr) {
+        var s = '';
+        for (var i = 0; i < arr.length; i++) {
+          s += String.fromCharCode(arr[i]);
+        }
+        callback('data:image/jpeg;base64,' + btoa(s));
+      });
+    }
+    loadAsDataURL("test.jpg", function (url) {
+        console.log("holy shit...");
+      displayImage("c1", url);
+    });
+    </script>
+
+    <h1>fuck me</h1>
+    <p>fuck me?</p>
+</body>
