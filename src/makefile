@@ -4,4 +4,4 @@ build:
 	#g++ -Wall message_buffer_test.cpp -o message_buffer_test -lpthread
 	#g++  -Wall jpg_test.cpp -o jpg_test
 	#g++  -Wall pipe_test.cpp -o pipe_test
-	g++  -Wall pipe_test2.cpp -o pipe_test2
+	#g++  -Wall pipe_test2.cpp -o pipe_test2

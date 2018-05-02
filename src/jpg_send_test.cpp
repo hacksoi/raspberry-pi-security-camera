@@ -11,6 +11,7 @@
 #define MAX_CONNECTIONS 2
 
 
+uint8_t dummy_jpeg_header[] = { 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01, 0x00, 0x60, 0x00, 0x60, 0x00 };
 uint8_t frame[Kilobytes(64)];
 
 
@@ -76,6 +77,21 @@ read_frame(uint8_t *dest, int dest_size)
     }
 
 done:
+
+    // fix incorrect 0xfe00 (jpeg-js won't parse it if it's there)
+
+    int i = 0;
+    for(; i < size; i++)
+    {
+        if(frame[i] == 0xfe &&
+           frame[i + 1] == 0x00)
+        {
+            break;
+        }
+    }
+
+    memcpy(&frame[i], dummy_jpeg_header, sizeof(dummy_jpeg_header));
+
     return size;
 }
 
