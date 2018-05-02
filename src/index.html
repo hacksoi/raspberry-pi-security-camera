@@ -51,9 +51,19 @@
                     callback('data:image/jpeg;base64,' + btoa(s));
                 });
             }
+
+            function load_other () {
+                loadAsDataURL("test_image2.jpg", function (url) {
+                    console.log("holy shit...");
+                    displayImage("c1", url);
+                });
+            }
+
             loadAsDataURL("test_image.jpg", function (url) {
                 console.log("holy shit...");
                 displayImage("c1", url);
+
+                setTimeout(load_other, 3000);
             });
 */
             // Simple loading of the JPEG images
@@ -78,11 +88,13 @@
             }
 
             var connection = new WebSocket("ws://192.168.1.141:8001");
+
             connection.onopen = function(event)
             {
                 console.log("performing test...");
                 connection.send("this is a test");
             };
+
             connection.onmessage = function(event)
             {
                 var file_reader = new FileReader();
@@ -90,6 +102,7 @@
                 {
                     var array_buffer = this.result;
                     var uint8_array = new Uint8Array(array_buffer);
+                    //console.log(uint8_array.length);
                     display_image("c1", uint8_array);
                     //console.log(view);
                 };
