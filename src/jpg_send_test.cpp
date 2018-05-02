@@ -146,18 +146,16 @@ main()
         return status;
     }
 
-#if 0
     status = ns_websocket_accept(&websocket, &peer);
     if(status != NS_SUCCESS)
     {
         DebugPrintInfo();
         return status;
     }
-#endif
 
 #if 0
     int child_pid;
-    const char *argv[] = {"ffmpeg", "-y", "-f", "v4l2", "-i", "/dev/video0", "-vcodec", "mjpeg", "-f", "mjpeg", "-pix_fmt", "rgba", "-an", "-", NULL};
+    const char *argv[] = {"ffmpeg", "-y", "-f", "v4l2", "-r", "4", "-i", "/dev/video0", "-vcodec", "mjpeg", "-f", "mjpeg", "-r", "4", "-an", "-", NULL};
     status = ns_fork_process("ffmpeg", (char *const *)argv, &child_pid);
     if(status != NS_SUCCESS)
     {
@@ -176,6 +174,68 @@ main()
 
         int bytes_sent = ns_websocket_send(&peer, frame, frame_size, BINARY);
         if(bytes_sent != frame_size)
+        {
+            DebugPrintInfo();
+            return status;
+        }
+    }
+#endif
+#if 0
+    int bufsize = Kilobytes(100);
+    uint8_t *image_mem = (uint8_t *)malloc(bufsize);
+    if(image_mem == NULL)
+    {
+        DebugPrintInfo();
+        return status;
+    }
+
+    int sleep = 500;
+    for(int i = 0;; i++)
+    {
+        int frame_num = i % 20;
+
+        char *base = (char *)"test_frames/test_image";
+        char *ext = (char *)".jpg";
+        char filename[100];
+        int len = 0;
+
+        strcpy(filename, base);
+        len += strlen(base);
+        len += ns_string_from_int(&filename[len], frame_num);
+        strcpy(&filename[len], ext);
+        len += strlen(ext);
+
+        NsFile image;
+        status = ns_file_open_read(&image, filename);
+        if(status != NS_SUCCESS)
+        {
+            DebugPrintInfo();
+            return status;
+        }
+
+        int image_size = ns_file_load(&image, image_mem, bufsize);
+        if(image_size < 0)
+        {
+            DebugPrintInfo();
+            return status;
+        }
+
+        status = ns_file_close(&image);
+        if(status != NS_SUCCESS)
+        {
+            DebugPrintInfo();
+            return status;
+        }
+
+        int bytes_sent = ns_websocket_send(&peer, image_mem, image_size, BINARY);
+        if(bytes_sent <= 0)
+        {
+            DebugPrintInfo();
+            return status;
+        }
+
+        status = ns_thread_sleep(sleep);
+        if(status != NS_SUCCESS)
         {
             DebugPrintInfo();
             return status;
@@ -201,7 +261,7 @@ main()
             return status;
         }
 
-        char *base = (char *)"../test_frames/test_image";
+        char *base = (char *)"test_frames/test_image";
         char *ext = (char *)".jpg";
         char filename[100];
         int len = 0;
@@ -234,7 +294,8 @@ main()
             return status;
         }
     }
-#else
+#endif
+#if 0
     NsFile image1;
     status = ns_file_open(&image1, "test_image.jpg");
     if(status != NS_SUCCESS)
