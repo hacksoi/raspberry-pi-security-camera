@@ -78,6 +78,7 @@ read_frame(uint8_t *dest, int dest_size)
 
 done:
 
+#if 0
     // fix incorrect 0xfe00 (jpeg-js won't parse it if it's there)
 
     int i = 0;
@@ -91,6 +92,7 @@ done:
     }
 
     memcpy(&frame[i], dummy_jpeg_header, sizeof(dummy_jpeg_header));
+#endif
 
     return size;
 }
