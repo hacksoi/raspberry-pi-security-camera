@@ -78,7 +78,7 @@ read_frame(uint8_t *dest, int dest_size)
 
 done:
 
-#if 0
+#if 1
     // fix incorrect 0xfe00 (jpeg-js won't parse it if it's there)
 
     int i = 0;
@@ -153,9 +153,9 @@ main()
         return status;
     }
 
-#if 0
+#if 1
     int child_pid;
-    const char *argv[] = {"ffmpeg", "-y", "-f", "v4l2", "-r", "4", "-i", "/dev/video0", "-vcodec", "mjpeg", "-f", "mjpeg", "-r", "4", "-an", "-", NULL};
+    const char *argv[] = {"ffmpeg", "-y", "-f", "v4l2", "-i", "/dev/video0", "-vcodec", "mjpeg", "-f", "mjpeg", "-an", "-", NULL};
     status = ns_fork_process("ffmpeg", (char *const *)argv, &child_pid);
     if(status != NS_SUCCESS)
     {
@@ -242,7 +242,7 @@ main()
         }
     }
 #endif
-#if 1
+#if 0
     int child_pid;
     const char *argv[] = {"ffmpeg", "-y", "-f", "v4l2", "-i", "/dev/video0", "-vcodec", "mjpeg", "-f", "mjpeg", "-an", "-", NULL};
     status = ns_fork_process("ffmpeg", (char *const *)argv, &child_pid);

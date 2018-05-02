@@ -5,13 +5,13 @@
 #include "ns_websocket.h"
 #include "ns_file.h"
 #include "ns_http_server.h"
+#include "ns_fork.h"
 
 
-#define NUM_WORKER_THREADS 3
 #define MAX_CONNECTIONS 64
 
-#define HTTP_SERVER_PORT "8000"
-#define VIDEO_STREAM_PORT "3491"
+#define HTTP_SERVER_PORT "8090"
+#define VIDEO_STREAM_PORT "8091"
 
 
 struct VsWebSocket
@@ -26,15 +26,83 @@ struct VsWebSocketList
     VsWebSocket *head;
     NsCondv condv;
     NsMutex mutex;
-    int size;
 };
 
 
-global NsWorkerThreads worker_threads;
-global VsWebSocketList vs_websocket_lists[NUM_WORKER_THREADS];
+global NsThread peer_sender_thread;
+global VsWebSocketList vs_websocket_list;
 global VsWebSocket vs_websockets[MAX_CONNECTIONS];
 global VsWebSocket *vs_websocket_free_list_head;
 
+uint8_t frame[Kilobytes(128)];
+int frame_size;
+
+
+int
+read_frame(uint8_t *dst, int dst_size)
+{
+    int status;
+
+    int size;
+    uint16_t two = 0;
+    bool found_start = false;
+    while(1)
+    {
+        int c = getchar();
+        if(c == EOF)
+        {
+            DebugPrintInfo();
+            return NS_ERROR;
+        }
+
+        two <<= 8;
+        two |= c;
+
+        if(!found_start)
+        {
+            if(two == 0xffd8)
+            {
+                found_start = true;
+
+                dst[size++] = 0xff;
+                dst[size++] = 0xd8;
+            }
+        }
+        else
+        {
+            if(size >= dst_size)
+            {
+                DebugPrintInfo();
+                return NS_ERROR;
+            }
+
+            dst[size++] = c;
+
+            if(two == 0xffd9)
+            {
+                printf("end of image detected: %d bytes\n", size);
+                break;
+            }
+        }
+    }
+
+    // fix incorrect 0xfe00 (jpeg-js won't parse it if it's there)
+
+    int i = 0;
+    for(; i < size; i++)
+    {
+        if(dst[i] == 0xfe &&
+           dst[i + 1] == 0x00)
+        {
+            break;
+        }
+    }
+
+    uint8_t dummy_jpeg_header[] = { 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01, 0x00, 0x60, 0x00, 0x60, 0x00 };
+    memcpy(&dst[i], dummy_jpeg_header, sizeof(dummy_jpeg_header));
+
+    return size;
+}
 
 int
 init_list(VsWebSocketList *list)
@@ -102,8 +170,6 @@ add_websocket(VsWebSocketList *list, VsWebSocket *websocket)
         list->head = websocket;
     }
 
-    list->size++;
-
     status = ns_condv_signal(&list->condv);
     if(status != NS_SUCCESS)
     {
@@ -163,8 +229,6 @@ remove_websocket(VsWebSocketList *list, VsWebSocket *websocket)
         next->prev = prev;
     }
 
-    list->size--;
-
     // add to free list
     websocket->next = vs_websocket_free_list_head;
     vs_websocket_free_list_head = websocket;
@@ -173,83 +237,90 @@ remove_websocket(VsWebSocketList *list, VsWebSocket *websocket)
 }
 
 void *
-video_stream_peer_sender_thread_entry(void *thread_data)
+peer_sender_thread_entry(void *thread_data)
 {
     int status;
-    VsWebSocketList *list = (VsWebSocketList *)thread_data;
+
+    int child_pid;
+    const char *argv[] = {"ffmpeg", "-y", "-f", "v4l2", "-i", "/dev/video0", "-vcodec", "mjpeg", "-r", "5", "-f", "mjpeg", "-an", "-", NULL};
+    status = ns_fork_process("ffmpeg", (char *const *)argv, &child_pid);
+    if(status != NS_SUCCESS)
+    {
+        DebugPrintInfo();
+        return (void *)status;
+    }
 
     while(1)
     {
-        ns_mutex_lock(&list->mutex);
-
-        // wait for list to be non empty
-        while(list->size == 0)
+        int frame_size = read_frame(frame, sizeof(frame));
+        if(frame_size <= 0)
         {
-            ns_condv_wait(&list->condv, &list->mutex);
+            DebugPrintInfo();
+            return (void *)frame_size;
         }
 
-        VsWebSocket vs_dummy_websocket;
-        VsWebSocket *cur_vs_websocket = list->head;
-        printf("thread: %lu\n", GetThread());
-        while(cur_vs_websocket != NULL)
+        status = ns_mutex_lock(&vs_websocket_list.mutex);
+        if(status != NS_SUCCESS)
         {
-            NsWebSocket *websocket = &cur_vs_websocket->websocket;
-            printf("hello; %d\n", websocket->socket.internal_socket);
-
-            // fill out message
-            char message[];
-            int message_length;
-            {
-            }
-
-#if 0
-            char *message = (char *)"funny cat photos";
-            int message_length = strlen(message) + 1;
-#endif
-            int bytes_sent = ns_websocket_send(websocket, message, message_length);
-            if(bytes_sent != message_length)
-            {
-                if(bytes_sent == 0)
-                {
-                    printf("main: closing websocket...\n");
-
-                    status = ns_websocket_close(websocket);
-                    if(status != NS_SUCCESS)
-                    {
-                        DebugPrintInfo();
-                        return (void *)status;
-                    }
-
-                    vs_dummy_websocket.next = cur_vs_websocket->next;
-
-                    status = remove_websocket(list, cur_vs_websocket);
-                    if(status != NS_SUCCESS)
-                    {
-                        DebugPrintInfo();
-                        return (void *)status;
-                    }
-
-                    cur_vs_websocket = &vs_dummy_websocket;
-
-                    printf("main: websocket closed\n");
-                }
-                else
-                {
-                    DebugPrintInfo();
-                    return (void *)bytes_sent;
-                }
-            }
-
-            cur_vs_websocket = cur_vs_websocket->next;
+            DebugPrintInfo();
+            return (void *)status;
         }
-        printf("\n");
 
-        ns_mutex_unlock(&list->mutex);
+        if(vs_websocket_list.head != NULL)
+        {
+            VsWebSocket vs_dummy_websocket;
+            VsWebSocket *cur_vs_websocket = vs_websocket_list.head;
+            while(cur_vs_websocket != NULL)
+            {
+                NsWebSocket *websocket = &cur_vs_websocket->websocket;
 
-        usleep(500000);
+                int bytes_sent = ns_websocket_send(websocket, frame, frame_size);
+                if(bytes_sent != frame_size)
+                {
+                    if(bytes_sent == 0)
+                    {
+                        printf("main: closing websocket...\n");
+
+                        status = ns_websocket_destroy(websocket);
+                        if(status != NS_SUCCESS)
+                        {
+                            DebugPrintInfo();
+                            return (void *)status;
+                        }
+
+                        vs_dummy_websocket.next = cur_vs_websocket->next;
+
+                        status = remove_websocket(&vs_websocket_list, cur_vs_websocket);
+                        if(status != NS_SUCCESS)
+                        {
+                            DebugPrintInfo();
+                            return (void *)status;
+                        }
+
+                        cur_vs_websocket = &vs_dummy_websocket;
+
+                        printf("main: websocket closed\n");
+                    }
+                    else
+                    {
+                        DebugPrintInfo();
+                        return (void *)bytes_sent;
+                    }
+                }
+
+                cur_vs_websocket = cur_vs_websocket->next;
+            }
+        }
+
+        status = ns_mutex_unlock(&vs_websocket_list.mutex);
+        if(status != NS_SUCCESS)
+        {
+            DebugPrintInfo();
+            return (void *)status;
+        }
     }
 
-    return NS_SUCCESS;
+    return (void *)NS_SUCCESS;
 }
 
 void *
@@ -275,7 +346,7 @@ video_stream_peer_getter_thread_entry(void *data)
         }
 
         NsWebSocket *peer_websocket = &peer_vs_websocket->websocket;
-        status = ns_websocket_get_peer(&websocket, peer_websocket);
+        status = ns_websocket_accept(&websocket, peer_websocket);
         if(status != NS_SUCCESS)
         {
             DebugPrintInfo();
@@ -311,18 +382,7 @@ video_stream_peer_getter_thread_entry(void *data)
 
         printf("basic test passed\n");
 
-        // add peer to list
-
-        int smallest_idx = 0;
-        for(int i = 0; i < NUM_WORKER_THREADS; i++)
-        {
-            if(vs_websocket_lists[i].size < vs_websocket_lists[smallest_idx].size)
-            {
-                smallest_idx = i;
-            }
-        }
-
-        status = add_websocket(&vs_websocket_lists[smallest_idx], peer_vs_websocket);
+        status = add_websocket(&vs_websocket_list, peer_vs_websocket);
         if(status != NS_SUCCESS)
         {
             DebugPrintInfo();
@@ -355,14 +415,7 @@ main()
         return NS_ERROR;
     }
 
-    status = ns_http_server_startup(MAX_CONNECTIONS, HTTP_SERVER_PORT, 4);
-    if(status != NS_SUCCESS)
-    {
-        DebugPrintInfo();
-        return status;
-    }
-
-    status = ns_worker_threads_create(&worker_threads, NUM_WORKER_THREADS, MAX_CONNECTIONS);
+    status = ns_http_server_startup(HTTP_SERVER_PORT, MAX_CONNECTIONS, 4);
     if(status != NS_SUCCESS)
     {
         DebugPrintInfo();
@@ -376,90 +429,14 @@ main()
         vs_websockets[i].next = &vs_websockets[i + 1];
     }
 
-    for(int i = 0; i < NUM_WORKER_THREADS; i++)
+    status = ns_thread_create(&peer_sender_thread, peer_sender_thread_entry, NULL);
+    if(status != NS_SUCCESS)
     {
-        VsWebSocketList *list = &vs_websocket_lists[i];
-
-        status = init_list(list);
-        if(status != NS_SUCCESS)
-        {
-            DebugPrintInfo();
-            return status;
-        }
-
-        status = ns_worker_threads_add_work(&worker_threads, 
-                                            video_stream_peer_sender_thread_entry, 
-                                            (void *)list);
-        if(status != NS_SUCCESS)
-        {
-            DebugPrintInfo();
-            return status;
-        }
+        DebugPrintInfo();
+        return status;
     }
 
     video_stream_peer_getter_thread_entry(NULL);
 
 	return NS_SUCCESS;
 }
-
-
-#if 0
-#include <stdint.h>
-#include <unistd.h>
-#include <stdio.h>
-
-enum state
-{
-    LOOKING_IMAGE,
-    READING_IMAGE,
-};
-
-int main()
-{
-    state cur_state = LOOKING_IMAGE;
-
-    uint16_t two = 0;
-    int size;
-    while(1)
-    {
-        int c = getchar();
-        if(c == EOF)
-        {
-            break;
-        }
-
-        switch(cur_state)
-        {
-            case LOOKING_IMAGE:
-            {
-                if(two == 0xffd8)
-                {
-                    printf("start of image detected\n");
-
-                    // set up for next state
-                    size = 0;
-                    cur_state = READING_IMAGE;
-                }
-            } break;
-
-            case READING_IMAGE:
-            {
-                if(two == 0xffd9)
-                {
-                    printf("end of image detected: %d bytes\n", size);
-
-                    // set up for next state
-                    cur_state = LOOKING_IMAGE;
-                }
-                else
-                {
-                    size += 1;
-                }
-            } break;
-        }
-
-        two <<= 8;
-        two |= c;
-    }
-}
-#endif
