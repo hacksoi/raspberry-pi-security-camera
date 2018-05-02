@@ -6,8 +6,7 @@
     </head>
 
     <body>
-        <h1>My First Heading</h1>
-        <p>My first paragraph.</p>
+        <h1>Raspberry Pi Security Camera</h1>
 
         <table>
             <tr>
@@ -16,6 +15,47 @@
         </table>
 
         <script>
+            // Simple loading of the JPEG images
+            function display_image(canvasId, arr) {
+                var s = '';
+                for (var i = 0; i < arr.length; i++) {
+                    s += String.fromCharCode(arr[i]);
+                }
+                var url = 'data:image/jpeg;base64,' + btoa(s);
+
+                var j = new JpegImage();
+                j.onload = function() {
+                    var c = document.getElementById(canvasId);
+                    c.width = j.width;
+                    c.height = j.height;
+                    var ctx = c.getContext("2d");
+                    var d = ctx.getImageData(0,0,j.width,j.height);
+                    j.copyToImageData(d);
+                    ctx.putImageData(d, 0, 0);
+                };
+                j.load(url);
+            }
+
+            var connection = new WebSocket("ws://192.168.1.141:8091");
+
+            connection.onopen = function(event)
+            {
+                console.log("connected!");
+            };
+
+            connection.onmessage = function(event)
+            {
+                var file_reader = new FileReader();
+                file_reader.onload = function()
+                {
+                    var array_buffer = this.result;
+                    var uint8_array = new Uint8Array(array_buffer);
+                    console.log(uint8_array.length);
+                    display_image("c1", uint8_array);
+                    //console.log(view);
+                };
+                file_reader.readAsArrayBuffer(event.data);
+            };
 /*
             // Simple loading of the JPEG images
             function displayImage(canvasId, url) {
@@ -66,48 +106,6 @@
                 setTimeout(load_other, 3000);
             });
 */
-            // Simple loading of the JPEG images
-            function display_image(canvasId, arr) {
-                var s = '';
-                for (var i = 0; i < arr.length; i++) {
-                    s += String.fromCharCode(arr[i]);
-                }
-                var url = 'data:image/jpeg;base64,' + btoa(s);
-
-                var j = new JpegImage();
-                j.onload = function() {
-                    var c = document.getElementById(canvasId);
-                    c.width = j.width;
-                    c.height = j.height;
-                    var ctx = c.getContext("2d");
-                    var d = ctx.getImageData(0,0,j.width,j.height);
-                    j.copyToImageData(d);
-                    ctx.putImageData(d, 0, 0);
-                };
-                j.load(url);
-            }
-
-            var connection = new WebSocket("ws://192.168.1.141:8091");
-
-            connection.onopen = function(event)
-            {
-                console.log("performing test...");
-                connection.send("this is a test");
-            };
-
-            connection.onmessage = function(event)
-            {
-                var file_reader = new FileReader();
-                file_reader.onload = function()
-                {
-                    var array_buffer = this.result;
-                    var uint8_array = new Uint8Array(array_buffer);
-                    console.log(uint8_array.length);
-                    display_image("c1", uint8_array);
-                    //console.log(view);
-                };
-                file_reader.readAsArrayBuffer(event.data);
-            };
         </script>
     </body>
 </html>

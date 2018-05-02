@@ -1,3 +1,7 @@
+#if 0
+TODO: handle peer disconnecting by switching from wifi to mobile data
+#endif
+
 #include "ns_common.h"
 #include "ns_message_queue.h"
 #include "ns_socket.h"
@@ -34,7 +38,7 @@ global VsWebSocketList vs_websocket_list;
 global VsWebSocket vs_websockets[MAX_CONNECTIONS];
 global VsWebSocket *vs_websocket_free_list_head;
 
-uint8_t frame[Kilobytes(128)];
+uint8_t frame[Kilobytes(512)];
 int frame_size;
 
 
@@ -355,6 +359,7 @@ video_stream_peer_getter_thread_entry(void *data)
 
         printf("main: received a peer\n");
 
+#if 0
         // do basic test
 
         char test_message[256];
@@ -381,6 +386,7 @@ video_stream_peer_getter_thread_entry(void *data)
         }
 
         printf("basic test passed\n");
+#endif
 
         status = add_websocket(&vs_websocket_list, peer_vs_websocket);
         if(status != NS_SUCCESS)
