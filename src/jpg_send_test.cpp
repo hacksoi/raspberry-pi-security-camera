@@ -244,7 +244,7 @@ main()
 #endif
 #if 1
     int child_pid;
-    const char *argv[] = {"ffmpeg", "-y", "-f", "v4l2", "-i", "/dev/video0", "-vcodec", "mjpeg", "-f", "mjpeg", "-pix_fmt", "rgba", "-an", "-", NULL};
+    const char *argv[] = {"ffmpeg", "-y", "-f", "v4l2", "-i", "/dev/video0", "-vcodec", "mjpeg", "-f", "mjpeg", "-an", "-", NULL};
     status = ns_fork_process("ffmpeg", (char *const *)argv, &child_pid);
     if(status != NS_SUCCESS)
     {
