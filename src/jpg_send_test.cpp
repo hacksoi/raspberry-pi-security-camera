@@ -12,7 +12,7 @@
 
 
 uint8_t dummy_jpeg_header[] = { 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x01, 0x00, 0x60, 0x00, 0x60, 0x00 };
-uint8_t frame[Kilobytes(64)];
+uint8_t frame[Kilobytes(128)];
 
 
 enum State
@@ -244,7 +244,7 @@ main()
 #endif
 #if 1
     int child_pid;
-    const char *argv[] = {"ffmpeg", "-y", "-f", "v4l2", "-i", "/dev/video0", "-vcodec", "mjpeg", "-f", "mjpeg", "-pix_fmt", "rgba", "-an", "-", NULL};
+    const char *argv[] = {"ffmpeg", "-y", "-f", "v4l2", "-i", "/dev/video0", "-vcodec", "mjpeg", "-f", "mjpeg", "-an", "-", NULL};
     status = ns_fork_process("ffmpeg", (char *const *)argv, &child_pid);
     if(status != NS_SUCCESS)
     {
