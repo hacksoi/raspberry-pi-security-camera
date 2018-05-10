@@ -272,11 +272,11 @@ peer_sender_thread_entry(void *thread_data)
 
         if(vs_websocket_list.head != NULL)
         {
-            VsWebSocket vs_dummy_websocket;
             VsWebSocket *cur_vs_websocket = vs_websocket_list.head;
             while(cur_vs_websocket != NULL)
             {
                 NsWebSocket *websocket = &cur_vs_websocket->websocket;
+                VsWebSocket *next = cur_vs_websocket->next;
 
                 int bytes_sent = ns_websocket_send(websocket, frame, frame_size);
                 if(bytes_sent != frame_size)
@@ -292,16 +292,12 @@ peer_sender_thread_entry(void *thread_data)
                             return (void *)status;
                         }
 
-                        vs_dummy_websocket.next = cur_vs_websocket->next;
-
                         status = remove_websocket(&vs_websocket_list, cur_vs_websocket);
                         if(status != NS_SUCCESS)
                         {
                             DebugPrintInfo();
                             return (void *)status;
                         }
-
-                        cur_vs_websocket = &vs_dummy_websocket;
 
                         printf("main: websocket closed\n");
                     }
@@ -312,7 +308,7 @@ peer_sender_thread_entry(void *thread_data)
                     }
                 }
 
-                cur_vs_websocket = cur_vs_websocket->next;
+                cur_vs_websocket = next;
             }
         }
 
